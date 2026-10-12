@@ -1,0 +1,6 @@
+@IrhamTrade.Server_HostAddress = http://localhost:5286
+
+GET {{IrhamTrade.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

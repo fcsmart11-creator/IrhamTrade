@@ -1,0 +1,9 @@
+﻿**/firebase-key.json
+firebase-key.json
+Data/firebase-key.json
+appsettings.json
+appsettings.Development.json
+bin/
+obj/
+.vs/
+*.user

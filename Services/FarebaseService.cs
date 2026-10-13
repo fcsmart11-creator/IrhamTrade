@@ -1,31 +1,63 @@
 ﻿using FirebaseAdmin;
+using FirebaseAdmin.Auth;
 using Google.Apis.Auth.OAuth2;
-using System;
+using Google.Cloud.Firestore;
+
+namespace IrhamTrade.Server.Services;
 
 public class FirebaseService
 {
-    public static void Initialize()
+    public FirebaseAuth? FirebaseAuth { get; private set; }
+    public FirestoreDb? FirestoreDb { get; private set; }
+    public bool IsInitialized { get; private set; } = false;
+
+    public FirebaseService(IConfiguration configuration)
     {
-        var jsonEnv = Environment.GetEnvironmentVariable("FIREBASE_KEY_JSON");
-        var projectId = Environment.GetEnvironmentVariable("Firebase__ProjectId") ?? "irhamtrade-31ca6";
-
-        GoogleCredential cred;
-
-        if (!string.IsNullOrEmpty(jsonEnv))
+        try
         {
-            Console.WriteLine("🔥 Firebase: Using ENV variable - SECURE Boss!");
-            cred = GoogleCredential.FromJson(jsonEnv);
+            var jsonFromEnv = Environment.GetEnvironmentVariable("FIREBASE_KEY_JSON");
+            var projectId = Environment.GetEnvironmentVariable("Firebase__ProjectId")
+                         ?? configuration["Firebase:ProjectId"]
+                         ?? "irhamtrade-31ca6";
+
+            GoogleCredential credential;
+
+            if (!string.IsNullOrEmpty(jsonFromEnv))
+            {
+                Console.WriteLine("🔥 Boss Firebase initializing from ENV Boss! - SECURE");
+                credential = GoogleCredential.FromJson(jsonFromEnv);
+            }
+            else
+            {
+                Console.WriteLine("🔥 Boss Firebase initializing from local file Boss!");
+                var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "firebase-key.json");
+                if (!File.Exists(path))
+                    path = Path.Combine(Directory.GetCurrentDirectory(), "Data", "firebase-key.json");
+                if (!File.Exists(path))
+                    path = "Data/firebase-key.json";
+
+                credential = GoogleCredential.FromFile(path);
+            }
+
+            if (FirebaseApp.DefaultInstance == null)
+            {
+                FirebaseApp.Create(new AppOptions()
+                {
+                    Credential = credential,
+                    ProjectId = projectId
+                });
+            }
+
+            FirebaseAuth = FirebaseAuth.DefaultInstance;
+            FirestoreDb = FirestoreDb.Create(projectId, new FirestoreClientBuilder { Credential = credential }.Build());
+
+            IsInitialized = true;
+            Console.WriteLine($"🔥 Boss Firebase initialized successfully Boss! Project: {projectId}");
         }
-        else
+        catch (Exception ex)
         {
-            Console.WriteLine("🔥 Firebase: Using local file for testing Boss!");
-            cred = GoogleCredential.FromFile("Data/firebase-key.json");
-        }
-
-        if (FirebaseApp.DefaultInstance == null)
-        {
-            FirebaseApp.Create(new AppOptions { Credential = cred, ProjectId = projectId });
-            Console.WriteLine($"🔥 Firebase Initialized for project: {projectId} Boss!");
+            Console.WriteLine($"❌ Boss Firebase init failed Boss: {ex.Message}");
+            IsInitialized = false;
         }
     }
 }

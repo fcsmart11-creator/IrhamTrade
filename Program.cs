@@ -34,7 +34,7 @@ if (!string.IsNullOrEmpty(postgresUrl))
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"BOSS - DATABASE_URL parse failed Boss: {ex.Message} Boss");
+        Console.WriteLine($" DATABASE_URL parse failed Boss: {ex.Message} Boss");
     }
 }
 

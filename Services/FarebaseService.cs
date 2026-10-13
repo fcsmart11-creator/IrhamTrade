@@ -24,12 +24,12 @@ public class FirebaseService
 
             if (!string.IsNullOrEmpty(jsonFromEnv))
             {
-                Console.WriteLine("🔥 Boss Firebase initializing from ENV Boss! - SECURE");
+                Console.WriteLine(" Boss Firebase initializing from ENV Boss! - SECURE");
                 credential = GoogleCredential.FromJson(jsonFromEnv);
             }
             else
             {
-                Console.WriteLine("🔥 Boss Firebase initializing from local file Boss!");
+                Console.WriteLine(" Firebase initializing from local file Boss!");
                 var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "firebase-key.json");
                 if (!File.Exists(path))
                     path = Path.Combine(Directory.GetCurrentDirectory(), "Data", "firebase-key.json");
@@ -49,14 +49,14 @@ public class FirebaseService
             }
 
             FirebaseAuth = FirebaseAuth.DefaultInstance;
-            FirestoreDb = FirestoreDb.Create(projectId, new FirestoreClientBuilder { Credential = credential }.Build());
+            FirestoreDb = FirestoreDb.Create(projectId);
 
             IsInitialized = true;
-            Console.WriteLine($"🔥 Boss Firebase initialized successfully Boss! Project: {projectId}");
+            Console.WriteLine($" Firebase initialized successfully Boss! Project: {projectId}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"❌ Boss Firebase init failed Boss: {ex.Message}");
+            Console.WriteLine($" Firebase init failed Boss: {ex.Message}");
             IsInitialized = false;
         }
     }

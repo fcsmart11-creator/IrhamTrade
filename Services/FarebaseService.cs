@@ -2,6 +2,7 @@
 using FirebaseAdmin.Auth;
 using Google.Apis.Auth.OAuth2;
 using Google.Cloud.Firestore;
+using Google.Cloud.Firestore.V1;
 
 namespace IrhamTrade.Server.Services;
 
@@ -25,6 +26,7 @@ public class FirebaseService
             if (!string.IsNullOrEmpty(jsonFromEnv))
             {
                 Console.WriteLine(" Boss Firebase initializing from ENV Boss! - SECURE");
+                Console.WriteLine($" Boss ENV JSON Length: {jsonFromEnv.Length} Boss");
                 credential = GoogleCredential.FromJson(jsonFromEnv);
             }
             else
@@ -36,9 +38,11 @@ public class FirebaseService
                 if (!File.Exists(path))
                     path = "Data/firebase-key.json";
 
+                Console.WriteLine($" Firebase using file: {path} Boss");
                 credential = GoogleCredential.FromFile(path);
             }
 
+            // Boss Prevent double init Boss
             if (FirebaseApp.DefaultInstance == null)
             {
                 FirebaseApp.Create(new AppOptions()
@@ -49,14 +53,23 @@ public class FirebaseService
             }
 
             FirebaseAuth = FirebaseAuth.DefaultInstance;
-            FirestoreDb = FirestoreDb.Create(projectId);
+
+            // ===== BOSS FIX - STRONG LINK Boss - Firestore must use SAME credential Boss =====
+            var clientBuilder = new FirestoreClientBuilder
+            {
+                Credential = credential
+            };
+            var firestoreClient = clientBuilder.Build();
+            FirestoreDb = FirestoreDb.Create(projectId, firestoreClient);
 
             IsInitialized = true;
-            Console.WriteLine($" Firebase initialized successfully Boss! Project: {projectId}");
+            Console.WriteLine($"  Firebase initialized successfully Boss! Project: {projectId} Boss!");
+            Console.WriteLine($"  FIREBASE STRONG LINK CONFIRMED Boss! Firestore READY Boss! ");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($" Firebase init failed Boss: {ex.Message}");
+            Console.WriteLine($"  Firebase init failed Boss: {ex.Message} Boss");
+            Console.WriteLine($"  Stack: {ex.StackTrace} Boss");
             IsInitialized = false;
         }
     }

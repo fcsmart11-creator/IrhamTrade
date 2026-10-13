@@ -9,12 +9,15 @@ using IrhamTrade.Server.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// FIX FOR RENDER REAL SERVER BOSS - PORT BOSS
+var port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
+builder.WebHost.UseUrls($"http://+:{port}");
+
 // 1. DATABASE Boss - SQLite Boss - good for many users Boss
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // 2. FIREBASE Boss - SINGLETON Boss - ONE connection for 10,000 users Boss - NO CRASH Boss
-// We create FirebaseService as Singleton Boss, it handles thread-safe init Boss
 builder.Services.AddSingleton<FirebaseService>();
 
 // 3. AUTH SERVICE Boss - uses FirebaseService Boss
@@ -57,13 +60,12 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 // Pipeline Boss
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+app.UseSwagger();
+app.UseSwaggerUI();
 
-app.UseHttpsRedirection();
+// FIX FOR RENDER BOSS - comment this Boss - causes crash on Render Boss
+// app.UseHttpsRedirection();
+
 app.UseCors("AllowAll");
 
 app.UseAuthentication();
@@ -71,6 +73,9 @@ app.UseAuthorization();
 
 app.MapControllers();
 
-Console.WriteLine($"Boss - Server running Boss! Project: {builder.Configuration["Firebase:ProjectId"]} Boss");
+// HEALTH CHECK BOSS - FOR RENDER TO KNOW SERVER LIVE BOSS
+app.MapGet("/", () => "IrhamTrade Server LIVE Boss!");
+
+Console.WriteLine($"Boss - Server running on port {port} Boss! Project: {builder.Configuration["Firebase:ProjectId"]} Boss");
 
 app.Run();

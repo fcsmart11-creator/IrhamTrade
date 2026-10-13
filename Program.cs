@@ -9,24 +9,29 @@ using IrhamTrade.Server.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// FIX FOR RENDER REAL SERVER BOSS - PORT BOSS
 var port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
 builder.WebHost.UseUrls($"http://+:{port}");
 
-// 1. DATABASE Boss - SQLite Boss - good for many users Boss
+// DATABASE Boss - use /tmp for Render write permission Boss
+var connStr = builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=/tmp/irhamtrade.db";
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseSqlite(connStr));
 
-// 2. FIREBASE Boss - SINGLETON Boss - ONE connection for 10,000 users Boss - NO CRASH Boss
+// FIREBASE Boss
 builder.Services.AddSingleton<FirebaseService>();
-
-// 3. AUTH SERVICE Boss - uses FirebaseService Boss
 builder.Services.AddScoped<AuthService>();
 
-// 4. JWT AUTH Boss - using YOUR real key Boss
-var jwtKey = builder.Configuration["Jwt:Key"];
-var jwtIssuer = builder.Configuration["Jwt:Issuer"];
-var jwtAudience = builder.Configuration["Jwt:Audience"];
+// JWT Boss - SAFE Boss - will not crash if null Boss
+var jwtKey = builder.Configuration["Jwt:Key"]
+          ?? builder.Configuration["Jwt__Key"]
+          ?? Environment.GetEnvironmentVariable("Jwt__Key")
+          ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
+
+var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "IrhamTrade";
+var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTradeUsers";
+
+// DEBUG Boss - see in logs Boss
+Console.WriteLine($"BOSS JWT Key exists: {!string.IsNullOrEmpty(jwtKey)} Length: {jwtKey.Length} Boss");
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -39,18 +44,14 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateIssuerSigningKey = true,
             ValidIssuer = jwtIssuer,
             ValidAudience = jwtAudience,
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey!))
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
         };
     });
 
 builder.Services.AddAuthorization();
-
-// 5. CONTROLLERS + SWAGGER Boss
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-
-// 6. CORS Boss - for Android Boss
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll", policy =>
@@ -59,23 +60,14 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Pipeline Boss
 app.UseSwagger();
 app.UseSwaggerUI();
-
-// FIX FOR RENDER BOSS - comment this Boss - causes crash on Render Boss
-// app.UseHttpsRedirection();
-
 app.UseCors("AllowAll");
-
 app.UseAuthentication();
 app.UseAuthorization();
-
 app.MapControllers();
-
-// HEALTH CHECK BOSS - FOR RENDER TO KNOW SERVER LIVE BOSS
 app.MapGet("/", () => "IrhamTrade Server LIVE Boss!");
 
-Console.WriteLine($"Boss - Server running on port {port} Boss! Project: {builder.Configuration["Firebase:ProjectId"]} Boss");
+Console.WriteLine($"Boss - Server running on port {port} Boss!");
 
 app.Run();

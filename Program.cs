@@ -15,14 +15,13 @@ builder.WebHost.UseUrls($"http://+:{port}");
 
 // ===== BOSS PROFESSIONAL DataProtection Boss =====
 builder.Services.AddDataProtection()
-  .PersistKeysToFileSystem(new DirectoryInfo("/tmp/keys"))
-  .SetApplicationName("IrhamTrade");
+.PersistKeysToFileSystem(new DirectoryInfo("/tmp/keys"))
+.SetApplicationName("IrhamTrade");
 
-// ===== BOSS PROFESSIONAL DATABASE Boss - FIXED Boss =====
+// ===== BOSS PROFESSIONAL DATABASE Boss =====
 var postgresUrl = Environment.GetEnvironmentVariable("DATABASE_URL") ?? Environment.GetEnvironmentVariable("DATABASE_INTERNAL_URL");
 var connStr = builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=/tmp/irhamtrade.db";
 
-// If Render gives DATABASE_URL like postgres://... convert to Npgsql format Boss
 if (!string.IsNullOrEmpty(postgresUrl))
 {
     try
@@ -40,7 +39,6 @@ if (!string.IsNullOrEmpty(postgresUrl))
 
 if (connStr.StartsWith("postgres", StringComparison.OrdinalIgnoreCase) || connStr.Contains("Host="))
 {
-    // BOSS LIVE - Postgres on Render - Reliable Boss
     builder.Services.AddDbContext<AppDbContext>(options =>
     {
         options.UseNpgsql(connStr, npgsqlOptions =>
@@ -49,30 +47,28 @@ if (connStr.StartsWith("postgres", StringComparison.OrdinalIgnoreCase) || connSt
         });
         options.EnableDetailedErrors();
     });
-    Console.WriteLine($"BOSS - Using POSTGRES in Production Boss Boss - STRONG Boss");
+    Console.WriteLine($"BOSS - Using POSTGRES in Production Boss");
 }
 else
 {
-    // BOSS LOCAL - Sqlite for testing Boss
     builder.Services.AddDbContext<AppDbContext>(options =>
         options.UseSqlite(connStr));
-    Console.WriteLine($"BOSS - Using SQLITE for Local/Test Boss - NOT FOR PRODUCTION Boss");
+    Console.WriteLine($"BOSS - Using SQLITE Boss - Path: {connStr} Boss");
 }
 
-// ===== BOSS FIX 100% - ALL SERVICES REGISTERED Boss =====
+// ===== BOSS FIX 100% - ALL SERVICES CLEAN Boss =====
 builder.Services.AddSingleton<FirebaseService>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<DashboardService>();
-builder.Services.AddScoped<FirestoreSercice>();
-builder.Services.AddScoped<FirebaseService>(); // Keep for compatibility Boss
+builder.Services.AddScoped<FirestoreService>();
 builder.Services.AddHttpClient();
 
 // JWT Boss
 var jwtKey = builder.Configuration["Jwt:Key"]
-        ?? builder.Configuration["Jwt__Key"]
-        ?? Environment.GetEnvironmentVariable("Jwt__Key")
-        ?? Environment.GetEnvironmentVariable("JWT_KEY")
-        ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
+      ?? builder.Configuration["Jwt__Key"]
+      ?? Environment.GetEnvironmentVariable("Jwt__Key")
+      ?? Environment.GetEnvironmentVariable("JWT_KEY")
+      ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
 
 var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "IrhamTrade";
 var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTradeUsers";
@@ -80,19 +76,19 @@ var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTradeUsers";
 Console.WriteLine($"BOSS JWT Key exists: {!string.IsNullOrEmpty(jwtKey)} Length: {jwtKey.Length} Boss");
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-  .AddJwtBearer(options =>
-  {
-      options.TokenValidationParameters = new TokenValidationParameters
-      {
-          ValidateIssuer = true,
-          ValidateAudience = true,
-          ValidateLifetime = true,
-          ValidateIssuerSigningKey = true,
-          ValidIssuer = jwtIssuer,
-          ValidAudience = jwtAudience,
-          IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
-      };
-  });
+.AddJwtBearer(options =>
+{
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidIssuer = jwtIssuer,
+        ValidAudience = jwtAudience,
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+    };
+});
 
 builder.Services.AddAuthorization();
 builder.Services.AddControllers();
@@ -103,12 +99,11 @@ builder.Services.AddCors(options =>
     options.AddPolicy("AllowAll", policy =>
         policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
 });
-
 builder.Services.AddHealthChecks();
 
 var app = builder.Build();
 
-// ===== BOSS FORCE FIREBASE INIT Boss - STRONG LINK MUST SHOW IN LOGS Boss =====
+// ===== BOSS FORCE FIREBASE INIT Boss =====
 try
 {
     var firebaseService = app.Services.GetRequiredService<FirebaseService>();
@@ -126,19 +121,44 @@ catch (Exception ex)
     Console.WriteLine($" BOSS FIREBASE EXCEPTION Boss: {ex.Message} Boss");
 }
 
-// ===== BOSS PROFESSIONAL AUTO-MIGRATION Boss =====
+// ===== BOSS PROFESSIONAL AUTO-MIGRATION - 100% FIXED Boss =====
 using (var scope = app.Services.CreateScope())
 {
     try
     {
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         Console.WriteLine("BOSS - Applying migrations Boss...");
-        db.Database.Migrate();
-        Console.WriteLine("BOSS - Database ready Boss! Tables created Boss!");
+
+        try
+        {
+            db.Database.Migrate();
+            Console.WriteLine("BOSS - Database migrated Boss! Tables created Boss!");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("No migrations"))
+        {
+            Console.WriteLine($"BOSS - No migrations found Boss, using EnsureCreated Boss: {ex.Message} Boss");
+            var created = db.Database.EnsureCreated();
+            Console.WriteLine($"BOSS - Database ready Boss! Tables created via EnsureCreated: {created} Boss!");
+        }
+
+        if (db.Database.CanConnect())
+        {
+            Console.WriteLine("BOSS - Database connected Boss! READY Boss!");
+        }
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"BOSS - Migration error Boss (will retry next start): {ex.Message} Boss");
+        Console.WriteLine($"BOSS - Migration error Boss: {ex.Message} Boss");
+        try
+        {
+            var db2 = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db2.Database.EnsureCreated();
+            Console.WriteLine("BOSS - Database created via fallback EnsureCreated Boss!");
+        }
+        catch (Exception ex2)
+        {
+            Console.WriteLine($"BOSS - Fallback also failed Boss: {ex2.Message} Boss");
+        }
     }
 }
 

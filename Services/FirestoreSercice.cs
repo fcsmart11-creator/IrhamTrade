@@ -1,6 +1,6 @@
 ﻿namespace IrhamTrade.Server.Services
 {
-    public class FarestoreSercice
+    public class FirestoreSercice
     {
     }
 }

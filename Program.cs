@@ -13,12 +13,10 @@ var builder = WebApplication.CreateBuilder(args);
 var port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
 builder.WebHost.UseUrls($"http://+:{port}");
 
-// ===== BOSS PROFESSIONAL DataProtection Boss =====
 builder.Services.AddDataProtection()
 .PersistKeysToFileSystem(new DirectoryInfo("/tmp/keys"))
 .SetApplicationName("IrhamTrade");
 
-// ===== BOSS PROFESSIONAL DATABASE Boss =====
 var postgresUrl = Environment.GetEnvironmentVariable("DATABASE_URL") ?? Environment.GetEnvironmentVariable("DATABASE_INTERNAL_URL");
 var connStr = builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=/tmp/irhamtrade.db";
 
@@ -56,19 +54,17 @@ else
     Console.WriteLine($"BOSS - Using SQLITE Boss - Path: {connStr} Boss");
 }
 
-// ===== BOSS FIX 100% - ALL SERVICES CLEAN Boss =====
 builder.Services.AddSingleton<FirebaseService>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<DashboardService>();
 builder.Services.AddScoped<FirestoreService>();
 builder.Services.AddHttpClient();
 
-// JWT Boss
 var jwtKey = builder.Configuration["Jwt:Key"]
-      ?? builder.Configuration["Jwt__Key"]
-      ?? Environment.GetEnvironmentVariable("Jwt__Key")
-      ?? Environment.GetEnvironmentVariable("JWT_KEY")
-      ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
+     ?? builder.Configuration["Jwt__Key"]
+     ?? Environment.GetEnvironmentVariable("Jwt__Key")
+     ?? Environment.GetEnvironmentVariable("JWT_KEY")
+     ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
 
 var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "IrhamTrade";
 var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTradeUsers";
@@ -103,7 +99,6 @@ builder.Services.AddHealthChecks();
 
 var app = builder.Build();
 
-// ===== BOSS FORCE FIREBASE INIT Boss =====
 try
 {
     var firebaseService = app.Services.GetRequiredService<FirebaseService>();
@@ -121,24 +116,26 @@ catch (Exception ex)
     Console.WriteLine($" BOSS FIREBASE EXCEPTION Boss: {ex.Message} Boss");
 }
 
-// ===== BOSS PROFESSIONAL AUTO-MIGRATION - 100% FIXED Boss =====
 using (var scope = app.Services.CreateScope())
 {
     try
     {
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        Console.WriteLine("BOSS - Applying migrations Boss...");
+        Console.WriteLine("BOSS - Checking database structure Boss...");
 
-        try
+        var hasMigrations = db.Database.GetMigrations().Any();
+
+        if (!hasMigrations)
         {
-            db.Database.Migrate();
-            Console.WriteLine("BOSS - Database migrated Boss! Tables created Boss!");
-        }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("No migrations"))
-        {
-            Console.WriteLine($"BOSS - No migrations found Boss, using EnsureCreated Boss: {ex.Message} Boss");
+            Console.WriteLine("BOSS - No migrations configured Boss, using EnsureCreated Boss");
             var created = db.Database.EnsureCreated();
             Console.WriteLine($"BOSS - Database ready Boss! Tables created via EnsureCreated: {created} Boss!");
+        }
+        else
+        {
+            Console.WriteLine("BOSS - Applying migrations Boss...");
+            db.Database.Migrate();
+            Console.WriteLine("BOSS - Database migrated Boss! Tables created Boss!");
         }
 
         if (db.Database.CanConnect())
@@ -152,8 +149,8 @@ using (var scope = app.Services.CreateScope())
         try
         {
             var db2 = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            db2.Database.EnsureCreated();
-            Console.WriteLine("BOSS - Database created via fallback EnsureCreated Boss!");
+            var created = db2.Database.EnsureCreated();
+            Console.WriteLine($"BOSS - Database created via fallback EnsureCreated: {created} Boss!");
         }
         catch (Exception ex2)
         {

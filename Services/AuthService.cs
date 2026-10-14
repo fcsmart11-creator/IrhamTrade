@@ -1,5 +1,4 @@
 ﻿using FirebaseAdmin.Auth;
-using FirebaseAdmin.Auth.Hash;
 using IrhamTrade.Server.Data;
 using IrhamTrade.Server.Models;
 using Microsoft.EntityFrameworkCore;
@@ -19,7 +18,7 @@ namespace IrhamTrade.Server.Services
         public string Phone { get; set; } = "";
         public string Location { get; set; } = "";
         public string Email { get; set; } = "";
-        public string Token { get; set; } = ""; // JWT Boss
+        public string Token { get; set; } = "";
     }
 
     public class AuthResult
@@ -61,11 +60,11 @@ namespace IrhamTrade.Server.Services
                 if (await _context.Users.AnyAsync(u => u.Email == email))
                     return Fail("This email already exists Boss. Please login Boss");
 
-                // Try create in Firebase Auth Boss - for Android APK Boss
+                // Try create in Firebase Auth Boss - NEVER crash if Firebase missing Boss
                 string firebaseUid = "";
                 try
                 {
-                    if (_firebaseService.FirebaseAuth != null)
+                    if (_firebaseService != null && _firebaseService.FirebaseAuth != null)
                     {
                         var fbUser = await _firebaseService.FirebaseAuth.CreateUserAsync(new UserRecordArgs
                         {
@@ -75,6 +74,11 @@ namespace IrhamTrade.Server.Services
                             EmailVerified = false
                         });
                         firebaseUid = fbUser.Uid;
+                        _logger.LogInformation($"Firebase user created Boss: {firebaseUid}");
+                    }
+                    else
+                    {
+                        _logger.LogWarning("FirebaseAuth is null Boss, skipping Firebase creation Boss, using SQLite only Boss");
                     }
                 }
                 catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
@@ -86,7 +90,7 @@ namespace IrhamTrade.Server.Services
                     _logger.LogWarning($"Firebase Auth create failed Boss, but continue with SQLite Boss: {ex.Message}");
                 }
 
-                // Hash with BCrypt Boss - SECURE Boss for huge users Boss
+                // Hash with BCrypt Boss - SECURE Boss
                 string hash = BCrypt.Net.BCrypt.HashPassword(password);
 
                 var user = new User
@@ -104,11 +108,12 @@ namespace IrhamTrade.Server.Services
 
                 _context.Users.Add(user);
                 await _context.SaveChangesAsync();
+                _logger.LogInformation($"Business user saved to SQLite Boss: {user.Id} {email}");
 
-                // Save to Firestore Boss - for scale Boss
+                // Save to Firestore Boss - NEVER crash if fails Boss
                 try
                 {
-                    if (_firebaseService.IsInitialized)
+                    if (_firebaseService != null && _firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
                     {
                         var doc = _firebaseService.FirestoreDb.Collection("users").Document(user.Id.ToString());
                         await doc.SetAsync(new Dictionary<string, object>
@@ -122,6 +127,7 @@ namespace IrhamTrade.Server.Services
                             { "location", location },
                             { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
                         });
+                        _logger.LogInformation($"Business user saved to Firestore Boss: {user.Id}");
                     }
                 }
                 catch (Exception ex)
@@ -130,14 +136,28 @@ namespace IrhamTrade.Server.Services
                 }
 
                 var appUser = ToAppUser(user);
-                appUser.Token = GenerateJwt(user);
+                try
+                {
+                    appUser.Token = GenerateJwt(user);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"JWT generation failed Boss: {ex.Message}");
+                    return Fail($"Server config error Boss: JWT Key missing on Render Boss. Please set Jwt:Key in Render Env Boss. Real error: {ex.Message}");
+                }
 
                 return new AuthResult { Success = true, Message = "Welcome to IRHAM TRADE Boss! Business account ready Boss!", User = appUser };
             }
+            catch (DbUpdateException ex)
+            {
+                _logger.LogError(ex, $"DB Update error Boss RegisterBusiness: {ex.InnerException?.Message}");
+                return Fail($"Database error Boss: {ex.InnerException?.Message ?? ex.Message} Boss. Try again Boss.");
+            }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "RegisterBusiness error Boss");
-                return Fail("Server busy Boss, try again Boss. Check internet Boss");
+                _logger.LogError(ex, $"RegisterBusiness REAL ERROR Boss: {ex.Message} | Inner: {ex.InnerException?.Message} | Stack: {ex.StackTrace}");
+                var realMsg = ex.InnerException?.Message ?? ex.Message;
+                return Fail($"Could not create account Boss. Real reason Boss: {realMsg} Boss. Type: {ex.GetType().Name} Boss");
             }
         }
 
@@ -160,7 +180,7 @@ namespace IrhamTrade.Server.Services
                 string firebaseUid = "";
                 try
                 {
-                    if (_firebaseService.FirebaseAuth != null)
+                    if (_firebaseService != null && _firebaseService.FirebaseAuth != null)
                     {
                         var fbUser = await _firebaseService.FirebaseAuth.CreateUserAsync(new UserRecordArgs
                         {
@@ -200,7 +220,7 @@ namespace IrhamTrade.Server.Services
 
                 try
                 {
-                    if (_firebaseService.IsInitialized)
+                    if (_firebaseService != null && _firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
                     {
                         var doc = _firebaseService.FirestoreDb.Collection("users").Document(user.Id.ToString());
                         await doc.SetAsync(new Dictionary<string, object>
@@ -222,14 +242,28 @@ namespace IrhamTrade.Server.Services
                 }
 
                 var appUser = ToAppUser(user);
-                appUser.Token = GenerateJwt(user);
+                try
+                {
+                    appUser.Token = GenerateJwt(user);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"JWT generation failed Boss buyer: {ex.Message}");
+                    return Fail($"Server config error Boss: JWT missing Boss. Real: {ex.Message}");
+                }
 
                 return new AuthResult { Success = true, Message = "Welcome Boss! Buyer account created Boss!", User = appUser };
             }
+            catch (DbUpdateException ex)
+            {
+                _logger.LogError(ex, $"DB error RegisterBuyer Boss: {ex.InnerException?.Message}");
+                return Fail($"Database error Boss: {ex.InnerException?.Message ?? ex.Message}");
+            }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "RegisterBuyer error Boss");
-                return Fail("Server busy Boss, try again Boss");
+                _logger.LogError(ex, $"RegisterBuyer REAL ERROR Boss: {ex.Message} | Inner: {ex.InnerException?.Message}");
+                var realMsg = ex.InnerException?.Message ?? ex.Message;
+                return Fail($"Could not create buyer account Boss. Real reason Boss: {realMsg} Boss. Type: {ex.GetType().Name}");
             }
         }
 
@@ -247,7 +281,6 @@ namespace IrhamTrade.Server.Services
                 if (user == null)
                     return Fail("Account not found Boss. Create account first Boss");
 
-                // BCrypt verify Boss - SECURE Boss
                 if (!BCrypt.Net.BCrypt.Verify(password, user.PasswordHash))
                     return Fail("Wrong password Boss. Try again Boss");
 
@@ -255,24 +288,36 @@ namespace IrhamTrade.Server.Services
                 await _context.SaveChangesAsync();
 
                 var appUser = ToAppUser(user);
-                appUser.Token = GenerateJwt(user);
+                try
+                {
+                    appUser.Token = GenerateJwt(user);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"JWT login failed Boss: {ex.Message}");
+                    return Fail($"Server JWT config error Boss: {ex.Message}");
+                }
 
                 return new AuthResult { Success = true, Message = "Login success Boss! Opening your account Boss!", User = appUser };
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Login error Boss");
-                return Fail("Login failed Boss. Internet slow Boss, try again Boss");
+                _logger.LogError(ex, $"Login REAL ERROR Boss: {ex.Message} | Inner: {ex.InnerException?.Message}");
+                var realMsg = ex.InnerException?.Message ?? ex.Message;
+                return Fail($"Login failed Boss. Real reason Boss: {realMsg} Boss");
             }
         }
 
         // ================= HELPERS Boss =================
         private string GenerateJwt(User user)
         {
-            var key = _config["Jwt:Key"]!;
-            var issuer = _config["Jwt:Issuer"];
-            var audience = _config["Jwt:Audience"];
-            var expireMinutes = int.Parse(_config["Jwt:ExpireMinutes"] ?? "1440");
+            var key = _config["Jwt:Key"] ?? throw new Exception("Jwt:Key is missing in appsettings / Render Env Boss!");
+            if (key.Length < 32) throw new Exception($"Jwt:Key too short Boss: {key.Length} chars, need 32+ Boss");
+            
+            var issuer = _config["Jwt:Issuer"] ?? "IrhamTrade";
+            var audience = _config["Jwt:Audience"] ?? "IrhamTrade";
+            var expireMinutesStr = _config["Jwt:ExpireMinutes"] ?? "1440";
+            if (!int.TryParse(expireMinutesStr, out var expireMinutes)) expireMinutes = 1440;
 
             var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
             var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);

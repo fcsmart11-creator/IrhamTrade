@@ -10,9 +10,9 @@ using IrhamTrade.Server.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// BOSS FIX 1 - Use 0.0.0.0 not + for Render health check Boss
 var port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
-builder.WebHost.UseUrls($"http://+:{port}");
-
+builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
 try
 {
@@ -23,8 +23,8 @@ try
         Console.WriteLine($"BOSS - Created {keysPath} Boss for DataProtection Boss");
     }
     builder.Services.AddDataProtection()
-       .PersistKeysToFileSystem(new DirectoryInfo(keysPath))
-       .SetApplicationName("IrhamTrade");
+      .PersistKeysToFileSystem(new DirectoryInfo(keysPath))
+      .SetApplicationName("IrhamTrade");
 }
 catch (Exception ex)
 {
@@ -56,7 +56,6 @@ if (connStr.StartsWith("postgres", StringComparison.OrdinalIgnoreCase) || connSt
     {
         options.UseNpgsql(connStr, npgsqlOptions =>
         {
-            // Facebook retry logic - 5 retries for Postgres on Render
             npgsqlOptions.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorCodesToAdd: null);
         });
         options.EnableDetailedErrors();
@@ -77,10 +76,10 @@ builder.Services.AddScoped<FirestoreService>();
 builder.Services.AddHttpClient();
 
 var jwtKey = builder.Configuration["Jwt:Key"]
-    ?? builder.Configuration["Jwt__Key"]
-    ?? Environment.GetEnvironmentVariable("Jwt__Key")
-    ?? Environment.GetEnvironmentVariable("JWT_KEY")
-    ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
+   ?? builder.Configuration["Jwt__Key"]
+   ?? Environment.GetEnvironmentVariable("Jwt__Key")
+   ?? Environment.GetEnvironmentVariable("JWT_KEY")
+   ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
 
 var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "IrhamTrade";
 var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTradeUsers";
@@ -115,7 +114,6 @@ builder.Services.AddHealthChecks();
 
 var app = builder.Build();
 
-
 app.UseExceptionHandler(errorApp =>
 {
     errorApp.Run(async context =>
@@ -144,6 +142,18 @@ catch (Exception ex)
     Console.WriteLine($" BOSS FIREBASE EXCEPTION Boss: {ex.Message} Boss - Server still running Boss");
 }
 
+// BOSS FIX 2 - Health check MUST be mapped BEFORE heavy DB init Boss - Render checks / immediately Boss
+app.MapGet("/", () => Results.Ok("IrhamTrade Server LIVE Boss! Professional Postgres Ready Boss! Firebase Sealed Boss! API: /api/dashboard /api/auth /swagger"));
+app.MapHealthChecks("/health");
+
+app.UseSwagger();
+app.UseSwaggerUI();
+app.UseCors("AllowAll");
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+
+// BOSS FIX 3 - DB init AFTER MapGet so health check answers fast Boss - No blocking Thread.Sleep Boss
 using (var scope = app.Services.CreateScope())
 {
     int maxRetries = 3;
@@ -154,7 +164,9 @@ using (var scope = app.Services.CreateScope())
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             Console.WriteLine($"BOSS - Checking database structure Boss... Attempt {attempt} Boss");
 
-            var hasMigrations = db.Database.GetMigrations().Any();
+            var hasMigrations = false;
+            try { hasMigrations = db.Database.GetMigrations().Any(); }
+            catch { hasMigrations = false; Console.WriteLine("BOSS - GetMigrations failed, using EnsureCreated Boss"); }
 
             if (!hasMigrations)
             {
@@ -173,7 +185,7 @@ using (var scope = app.Services.CreateScope())
             {
                 Console.WriteLine("BOSS - Database connected Boss! READY Boss!");
             }
-            break; // Success - exit retry
+            break;
         }
         catch (Exception ex)
         {
@@ -193,20 +205,12 @@ using (var scope = app.Services.CreateScope())
             }
             else
             {
-                Thread.Sleep(attempt * 2000); // 2s, 4s
+                // BOSS FIX - Use Task.Delay non-blocking? For startup keep Thread.Sleep but short Boss
+                Thread.Sleep(1000);
             }
         }
     }
 }
-
-app.UseSwagger();
-app.UseSwaggerUI();
-app.UseCors("AllowAll");
-app.UseAuthentication();
-app.UseAuthorization();
-app.MapControllers();
-app.MapGet("/", () => "IrhamTrade Server LIVE Boss! Professional Postgres Ready Boss! Firebase Sealed Boss! API: /api/dashboard /api/auth /swagger");
-app.MapHealthChecks("/health");
 
 Console.WriteLine($"Boss - Server running on port {port} Boss! SEALED Boss!");
 

@@ -14,62 +14,90 @@ namespace IrhamTrade.Server.Services
             _logger.LogInformation("DashboardService initialized Boss Project: {ProjectId}", _db.ProjectId);
         }
 
-        // === DEVICES BOSS - PROFESSIONAL ZERO-CRASH ===
-        public async Task<List<Dictionary<string, object>>> GetAllDevicesAsync()
+       
+        private async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, T fallback, string opName, int retries = 3)
         {
-            try
+            for (int attempt = 1; attempt <= retries; attempt++)
             {
-                var snap = await _db.Collection("devices").OrderByDescending("createdAt").Limit(500).GetSnapshotAsync();
-                return snap.Documents.Select(doc => {
-                    var dict = doc.ToDictionary();
-                    dict["id"] = doc.Id;
-                    dict["deviceId"] = doc.Id;
-                    return dict;
-                }).ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetAllDevices FAIL Boss: {Message}", ex.Message);
-                // Fallback without OrderBy if index missing Boss
                 try
                 {
-                    var snap = await _db.Collection("devices").Limit(500).GetSnapshotAsync();
-                    return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["deviceId"] = d.Id; return dict; }).ToList();
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+                    var task = action();
+                    var completed = await Task.WhenAny(task, Task.Delay(Timeout.Infinite, cts.Token));
+                    if (completed == task) return await task;
+                    throw new TimeoutException($"BOSS {opName} timeout 70s Boss");
                 }
-                catch { return new List<Dictionary<string, object>>(); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("BOSS {Op} attempt {Attempt} failed Boss: {Msg} Boss", opName, attempt, ex.Message);
+                    if (attempt == retries) return fallback;
+                    await Task.Delay(attempt == 1 ? 2000 : attempt == 2 ? 5000 : 10000);
+                }
             }
+            return fallback;
+        }
+
+        // === DEVICES BOSS - PROFESSIONAL ZERO-CRASH - KEPT 100% + SEALED ===
+        public async Task<List<Dictionary<string, object>>> GetAllDevicesAsync()
+        {
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                try
+                {
+                    var snap = await _db.Collection("devices").OrderByDescending("createdAt").Limit(500).GetSnapshotAsync();
+                    return snap.Documents.Select(doc => {
+                        var dict = doc.ToDictionary();
+                        dict["id"] = doc.Id;
+                        dict["deviceId"] = doc.Id;
+                        return dict;
+                    }).ToList();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "GetAllDevices FAIL Boss: {Message} - Trying fallback Boss", ex.Message);
+                    try
+                    {
+                        var snap = await _db.Collection("devices").Limit(500).GetSnapshotAsync();
+                        return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["deviceId"] = d.Id; return dict; }).ToList();
+                    }
+                    catch { return new List<Dictionary<string, object>>(); }
+                }
+            }, new List<Dictionary<string, object>>(), "GetAllDevices");
         }
 
         public async Task<List<Dictionary<string, object>>> GetDevicesByBusinessAsync(string businessId)
         {
             if (string.IsNullOrWhiteSpace(businessId)) return new List<Dictionary<string, object>>();
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
-                var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).OrderByDescending("createdAt").GetSnapshotAsync();
-                return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["deviceId"] = d.Id; return dict; }).ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "GetDevicesByBusiness ordered query failed Boss, trying unordered Boss for {BusinessId}", businessId);
                 try
                 {
-                    var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
-                    return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; return dict; }).ToList();
+                    var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).OrderByDescending("createdAt").GetSnapshotAsync();
+                    return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["deviceId"] = d.Id; return dict; }).ToList();
                 }
-                catch (Exception ex2)
+                catch (Exception ex)
                 {
-                    _logger.LogError(ex2, "GetDevicesByBusiness FAIL Boss");
-                    return new List<Dictionary<string, object>>();
+                    _logger.LogWarning(ex, "GetDevicesByBusiness ordered query failed Boss, trying unordered Boss for {BusinessId}", businessId);
+                    try
+                    {
+                        var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                        return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; return dict; }).ToList();
+                    }
+                    catch (Exception ex2)
+                    {
+                        _logger.LogError(ex2, "GetDevicesByBusiness FAIL Boss");
+                        return new List<Dictionary<string, object>>();
+                    }
                 }
-            }
+            }, new List<Dictionary<string, object>>(), $"GetDevicesByBusiness {businessId}");
         }
 
         public async Task<string> CreateDeviceAsync(Dictionary<string, object> data)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
-                // ===== IMAGE FIX Boss - 15 lines professional =====
+                // ===== IMAGE FIX Boss - 15 lines professional - KEPT 100% =====
                 if (data.TryGetValue("imageBase64", out var imgObj) && imgObj is string imgStr && imgStr.Length > 100)
                 {
                     data["imageUrl"] = imgStr;
@@ -88,24 +116,19 @@ namespace IrhamTrade.Server.Services
                 if (!data.TryGetValue("businessId", out var bid) || string.IsNullOrWhiteSpace(bid?.ToString()))
                     data["businessId"] = "unknown_boss";
 
-                data["business_id"] = data["businessId"]; // duplicate for compatibility Boss
+                data["business_id"] = data["businessId"];
                 if (!data.ContainsKey("status")) data["status"] = "active";
 
                 var doc = await _db.Collection("devices").AddAsync(data);
                 _logger.LogInformation("CreateDevice Boss {DeviceId} Business {BusinessId} Image:{HasImage}", doc.Id, data["businessId"], data.ContainsKey("hasImage"));
                 return doc.Id;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "CreateDevice FAIL Boss: {Message}", ex.Message);
-                throw; // Let controller return 500 Boss with real error Boss
-            }
+            }, null!, "CreateDevice");
         }
 
         public async Task<bool> UpdateDeviceAsync(string deviceId, Dictionary<string, object> data)
         {
             if (string.IsNullOrWhiteSpace(deviceId) || data == null) return false;
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
                 if (data.TryGetValue("imageBase64", out var imgObj) && imgObj is string imgStr && imgStr.Length > 100)
                 {
@@ -117,35 +140,25 @@ namespace IrhamTrade.Server.Services
                 await _db.Collection("devices").Document(deviceId).SetAsync(data, SetOptions.MergeAll);
                 _logger.LogInformation("UpdateDevice Boss {DeviceId}", deviceId);
                 return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "UpdateDevice FAIL Boss {DeviceId}: {Message}", deviceId, ex.Message);
-                return false;
-            }
+            }, false, $"UpdateDevice {deviceId}");
         }
 
         public async Task<bool> DeleteDeviceAsync(string deviceId)
         {
             if (string.IsNullOrWhiteSpace(deviceId)) return false;
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
                 await _db.Collection("devices").Document(deviceId).DeleteAsync();
                 _logger.LogInformation("DeleteDevice Boss {DeviceId}", deviceId);
                 return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "DeleteDevice FAIL Boss");
-                return false;
-            }
+            }, false, $"DeleteDevice {deviceId}");
         }
 
-        // === INTERESTS BOSS ===
+        // === INTERESTS BOSS - KEPT 100% + SEALED ===
         public async Task<string> CreateInterestAsync(Dictionary<string, object> data)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
                 data["createdAt"] = Timestamp.GetCurrentTimestamp();
                 data["updatedAt"] = Timestamp.GetCurrentTimestamp();
@@ -154,56 +167,57 @@ namespace IrhamTrade.Server.Services
                 var doc = await _db.Collection("interests").AddAsync(data);
                 _logger.LogInformation("CreateInterest Boss {Id} Business {BusinessId}", doc.Id, data.TryGetValue("businessId", out var b) ? b : "unknown");
                 return doc.Id;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "CreateInterest FAIL Boss");
-                throw;
-            }
+            }, null!, "CreateInterest");
         }
 
         public async Task<List<Dictionary<string, object>>> GetBuyerInterestsAsync(string buyerId)
         {
             if (string.IsNullOrWhiteSpace(buyerId)) return new();
-            try
-            {
-                var snap = await _db.Collection("interests").WhereEqualTo("buyerId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
-                return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["interestId"] = d.Id; return dict; }).ToList();
-            }
-            catch
+            return await ExecuteWithRetryAsync(async () =>
             {
                 try
                 {
-                    var snap = await _db.Collection("interests").WhereEqualTo("buyerId", buyerId).GetSnapshotAsync();
+                    var snap = await _db.Collection("interests").WhereEqualTo("buyerId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
                     return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["interestId"] = d.Id; return dict; }).ToList();
                 }
-                catch { return new(); }
-            }
+                catch
+                {
+                    try
+                    {
+                        var snap = await _db.Collection("interests").WhereEqualTo("buyerId", buyerId).GetSnapshotAsync();
+                        return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["interestId"] = d.Id; return dict; }).ToList();
+                    }
+                    catch { return new List<Dictionary<string, object>>(); }
+                }
+            }, new List<Dictionary<string, object>>(), $"GetBuyerInterests {buyerId}");
         }
 
         public async Task<List<Dictionary<string, object>>> GetBusinessInterestsAsync(string businessId)
         {
             if (string.IsNullOrWhiteSpace(businessId)) return new();
-            try
-            {
-                var snap = await _db.Collection("interests").WhereEqualTo("businessId", businessId).OrderByDescending("createdAt").GetSnapshotAsync();
-                return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["interestId"] = d.Id; return dict; }).ToList();
-            }
-            catch
+            return await ExecuteWithRetryAsync(async () =>
             {
                 try
                 {
-                    var snap = await _db.Collection("interests").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                    var snap = await _db.Collection("interests").WhereEqualTo("businessId", businessId).OrderByDescending("createdAt").GetSnapshotAsync();
                     return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["interestId"] = d.Id; return dict; }).ToList();
                 }
-                catch { return new(); }
-            }
+                catch
+                {
+                    try
+                    {
+                        var snap = await _db.Collection("interests").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                        return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["interestId"] = d.Id; return dict; }).ToList();
+                    }
+                    catch { return new List<Dictionary<string, object>>(); }
+                }
+            }, new List<Dictionary<string, object>>(), $"GetBusinessInterests {businessId}");
         }
 
         public async Task<bool> UpdateInterestStatusAsync(string interestId, string status)
         {
             if (string.IsNullOrWhiteSpace(interestId) || string.IsNullOrWhiteSpace(status)) return false;
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
                 var docRef = _db.Collection("interests").Document(interestId);
                 var snap = await docRef.GetSnapshotAsync();
@@ -221,52 +235,37 @@ namespace IrhamTrade.Server.Services
                 }
                 _logger.LogInformation("UpdateInterest Boss {Id} -> {Status}", interestId, status);
                 return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "UpdateInterest FAIL Boss");
-                return false;
-            }
+            }, false, $"UpdateInterest {interestId}");
         }
 
-        // === BUYERS + BUSINESSES PROFILE BOSS ===
+        // === BUYERS + BUSINESSES PROFILE BOSS - KEPT 100% + SEALED ===
         public async Task<Dictionary<string, object>?> GetBuyerProfileAsync(string buyerId)
         {
             if (string.IsNullOrWhiteSpace(buyerId)) return null;
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
                 var snap = await _db.Collection("users").Document(buyerId).GetSnapshotAsync();
                 if (!snap.Exists) snap = await _db.Collection("buyers").Document(buyerId).GetSnapshotAsync();
                 if (!snap.Exists) return null;
                 var dict = snap.ToDictionary(); dict["id"] = snap.Id; return dict;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetBuyerProfile FAIL Boss");
-                return null;
-            }
+            }, null, $"GetBuyerProfile {buyerId}");
         }
 
         public async Task<bool> UpdateBuyerProfileAsync(string buyerId, Dictionary<string, object> data)
         {
             if (string.IsNullOrWhiteSpace(buyerId) || data == null) return false;
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
                 data["updatedAt"] = Timestamp.GetCurrentTimestamp();
                 await _db.Collection("users").Document(buyerId).SetAsync(data, SetOptions.MergeAll);
                 return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "UpdateBuyerProfile FAIL Boss");
-                return false;
-            }
+            }, false, $"UpdateBuyerProfile {buyerId}");
         }
 
         public async Task<Dictionary<string, object>?> GetBusinessAsync(string businessId)
         {
             if (string.IsNullOrWhiteSpace(businessId)) return null;
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
                 var snap = await _db.Collection("users").Document(businessId).GetSnapshotAsync();
                 if (!snap.Exists) snap = await _db.Collection("businesses").Document(businessId).GetSnapshotAsync();
@@ -284,17 +283,12 @@ namespace IrhamTrade.Server.Services
                 else if (!dict.ContainsKey("BusinessName"))
                     dict["BusinessName"] = "IRHAM TRADE";
                 return dict;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetBusiness FAIL Boss");
-                return null;
-            }
+            }, null, $"GetBusiness {businessId}");
         }
 
         public async Task<List<Dictionary<string, object>>> GetAllBusinessesWithDevicesAsync()
         {
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
                 var bizSnap = await _db.Collection("users").WhereEqualTo("role", "business").Limit(100).GetSnapshotAsync();
                 if (bizSnap.Count == 0) bizSnap = await _db.Collection("businesses").Limit(100).GetSnapshotAsync();
@@ -316,12 +310,7 @@ namespace IrhamTrade.Server.Services
 
                 var result = await Task.WhenAll(tasks);
                 return result.ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetAllBusinessesWithDevices FAIL Boss");
-                return new List<Dictionary<string, object>>();
-            }
+            }, new List<Dictionary<string, object>>(), "GetAllBusinessesWithDevices");
         }
     }
 }

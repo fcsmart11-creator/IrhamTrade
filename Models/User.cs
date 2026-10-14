@@ -1,16 +1,22 @@
-﻿namespace IrhamTrade.Server.Models
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace IrhamTrade.Server.Models
 {
     public class User
     {
-        public int Id { get; set; }  // Auto increment Boss for SQLite Boss
+        [Key]
+        public int Id { get; set; } // Auto increment Boss for SQLite Boss
 
+        [Required]
         public string Email { get; set; } = "";
 
+        [Required]
         public string PasswordHash { get; set; } = ""; // BCrypt Boss - secure Boss
 
+        [Required]
         public string Role { get; set; } = ""; // "business" or "buyer" Boss
 
-        public string? BusinessName { get; set; }  // For business Boss
+        public string? BusinessName { get; set; } // For business Boss
 
         public string? FullName { get; set; } // For buyer Boss
 

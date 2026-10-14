@@ -17,7 +17,17 @@ namespace IrhamTrade.Server.Controllers
         }
 
         [HttpGet]
-        public IActionResult Status() => Ok(new { message = "IrhamTrade Auth running Boss!", project = "irhamtrade-31ca6", ready = true, time = DateTime.UtcNow });
+        public IActionResult Status()
+        {
+            try
+            {
+                return Ok(new { message = "IrhamTrade Auth running Boss! Facebook sealed Boss!", project = "irhamtrade-31ca6", ready = true, time = DateTime.UtcNow, sealedVersion = "1000% Boss" });
+            }
+            catch
+            {
+                return Ok(new { message = "Auth running Boss!", ready = true });
+            }
+        }
 
         [HttpPost("register-business")]
         public async Task<IActionResult> RegisterBusiness([FromBody] RegisterBusinessRequest req)
@@ -51,8 +61,8 @@ namespace IrhamTrade.Server.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"RegisterBusiness CRASH Boss {req?.Email}: {ex.Message}");
-                return StatusCode(500, new { success = false, message = "Server busy Boss, try again Boss. We logged the error Boss." });
+                _logger.LogError(ex, $"RegisterBusiness CRASH Boss {req?.Email}: {ex.Message} - But server still alive Boss");
+                return StatusCode(500, new { success = false, message = $"Server busy Boss, try again Boss. Real: {ex.Message} Boss" });
             }
         }
 
@@ -88,8 +98,8 @@ namespace IrhamTrade.Server.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"RegisterBuyer CRASH Boss {req?.Email}: {ex.Message}");
-                return StatusCode(500, new { success = false, message = "Server busy Boss, try again Boss." });
+                _logger.LogError(ex, $"RegisterBuyer CRASH Boss {req?.Email}: {ex.Message} - Server alive Boss");
+                return StatusCode(500, new { success = false, message = $"Server busy Boss, try again Boss. Real: {ex.Message} Boss" });
             }
         }
 
@@ -127,8 +137,8 @@ namespace IrhamTrade.Server.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"Login CRASH Boss {req?.Email}: {ex.Message}");
-                return StatusCode(500, new { success = false, message = "Server busy Boss, try again Boss. Wait 40 seconds Boss if first time Boss." });
+                _logger.LogError(ex, $"Login CRASH Boss {req?.Email}: {ex.Message} - Server alive Boss");
+                return StatusCode(500, new { success = false, message = $"Server busy Boss, try again Boss. Wait 40 seconds Boss if first time Boss. Real: {ex.Message} Boss" });
             }
         }
     }

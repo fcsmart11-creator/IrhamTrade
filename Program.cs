@@ -13,9 +13,24 @@ var builder = WebApplication.CreateBuilder(args);
 var port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
 builder.WebHost.UseUrls($"http://+:{port}");
 
-builder.Services.AddDataProtection()
-.PersistKeysToFileSystem(new DirectoryInfo("/tmp/keys"))
-.SetApplicationName("IrhamTrade");
+
+try
+{
+    var keysPath = "/tmp/keys";
+    if (!Directory.Exists(keysPath))
+    {
+        Directory.CreateDirectory(keysPath);
+        Console.WriteLine($"BOSS - Created {keysPath} Boss for DataProtection Boss");
+    }
+    builder.Services.AddDataProtection()
+       .PersistKeysToFileSystem(new DirectoryInfo(keysPath))
+       .SetApplicationName("IrhamTrade");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"BOSS DataProtection setup warning Boss: {ex.Message} Boss - Continuing Boss");
+    builder.Services.AddDataProtection().SetApplicationName("IrhamTrade");
+}
 
 var postgresUrl = Environment.GetEnvironmentVariable("DATABASE_URL") ?? Environment.GetEnvironmentVariable("DATABASE_INTERNAL_URL");
 var connStr = builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=/tmp/irhamtrade.db";
@@ -31,7 +46,7 @@ if (!string.IsNullOrEmpty(postgresUrl))
     }
     catch (Exception ex)
     {
-        Console.WriteLine($" DATABASE_URL parse failed Boss: {ex.Message} Boss");
+        Console.WriteLine($" DATABASE_URL parse failed Boss: {ex.Message} Boss - Using fallback Boss");
     }
 }
 
@@ -41,6 +56,7 @@ if (connStr.StartsWith("postgres", StringComparison.OrdinalIgnoreCase) || connSt
     {
         options.UseNpgsql(connStr, npgsqlOptions =>
         {
+            // Facebook retry logic - 5 retries for Postgres on Render
             npgsqlOptions.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorCodesToAdd: null);
         });
         options.EnableDetailedErrors();
@@ -61,10 +77,10 @@ builder.Services.AddScoped<FirestoreService>();
 builder.Services.AddHttpClient();
 
 var jwtKey = builder.Configuration["Jwt:Key"]
-     ?? builder.Configuration["Jwt__Key"]
-     ?? Environment.GetEnvironmentVariable("Jwt__Key")
-     ?? Environment.GetEnvironmentVariable("JWT_KEY")
-     ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
+    ?? builder.Configuration["Jwt__Key"]
+    ?? Environment.GetEnvironmentVariable("Jwt__Key")
+    ?? Environment.GetEnvironmentVariable("JWT_KEY")
+    ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
 
 var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "IrhamTrade";
 var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTradeUsers";
@@ -99,6 +115,18 @@ builder.Services.AddHealthChecks();
 
 var app = builder.Build();
 
+
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        context.Response.StatusCode = 500;
+        context.Response.ContentType = "application/json";
+        await context.Response.WriteAsync("{\"error\":\"BOSS Server error but still alive Boss - Try again Boss\",\"success\":false}");
+        Console.WriteLine($"BOSS Global exception caught Boss - Server still alive Boss: {context.Request.Path} Boss");
+    });
+});
+
 try
 {
     var firebaseService = app.Services.GetRequiredService<FirebaseService>();
@@ -108,53 +136,65 @@ try
     }
     else
     {
-        Console.WriteLine(" FIREBASE FAILED Boss - Check FIREBASE_KEY_JSON ENV Boss");
+        Console.WriteLine(" FIREBASE FAILED Boss - Check FIREBASE_KEY_JSON ENV Boss - But server still running Boss");
     }
 }
 catch (Exception ex)
 {
-    Console.WriteLine($" BOSS FIREBASE EXCEPTION Boss: {ex.Message} Boss");
+    Console.WriteLine($" BOSS FIREBASE EXCEPTION Boss: {ex.Message} Boss - Server still running Boss");
 }
 
 using (var scope = app.Services.CreateScope())
 {
-    try
+    int maxRetries = 3;
+    for (int attempt = 1; attempt <= maxRetries; attempt++)
     {
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        Console.WriteLine("BOSS - Checking database structure Boss...");
-
-        var hasMigrations = db.Database.GetMigrations().Any();
-
-        if (!hasMigrations)
-        {
-            Console.WriteLine("BOSS - No migrations configured Boss, using EnsureCreated Boss");
-            var created = db.Database.EnsureCreated();
-            Console.WriteLine($"BOSS - Database ready Boss! Tables created via EnsureCreated: {created} Boss!");
-        }
-        else
-        {
-            Console.WriteLine("BOSS - Applying migrations Boss...");
-            db.Database.Migrate();
-            Console.WriteLine("BOSS - Database migrated Boss! Tables created Boss!");
-        }
-
-        if (db.Database.CanConnect())
-        {
-            Console.WriteLine("BOSS - Database connected Boss! READY Boss!");
-        }
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"BOSS - Migration error Boss: {ex.Message} Boss");
         try
         {
-            var db2 = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            var created = db2.Database.EnsureCreated();
-            Console.WriteLine($"BOSS - Database created via fallback EnsureCreated: {created} Boss!");
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            Console.WriteLine($"BOSS - Checking database structure Boss... Attempt {attempt} Boss");
+
+            var hasMigrations = db.Database.GetMigrations().Any();
+
+            if (!hasMigrations)
+            {
+                Console.WriteLine("BOSS - No migrations configured Boss, using EnsureCreated Boss");
+                var created = db.Database.EnsureCreated();
+                Console.WriteLine($"BOSS - Database ready Boss! Tables created via EnsureCreated: {created} Boss!");
+            }
+            else
+            {
+                Console.WriteLine("BOSS - Applying migrations Boss...");
+                db.Database.Migrate();
+                Console.WriteLine("BOSS - Database migrated Boss! Tables created Boss!");
+            }
+
+            if (db.Database.CanConnect())
+            {
+                Console.WriteLine("BOSS - Database connected Boss! READY Boss!");
+            }
+            break; // Success - exit retry
         }
-        catch (Exception ex2)
+        catch (Exception ex)
         {
-            Console.WriteLine($"BOSS - Fallback also failed Boss: {ex2.Message} Boss");
+            Console.WriteLine($"BOSS - Migration attempt {attempt} error Boss: {ex.Message} Boss");
+            if (attempt == maxRetries)
+            {
+                try
+                {
+                    var db2 = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                    var created = db2.Database.EnsureCreated();
+                    Console.WriteLine($"BOSS - Database created via fallback EnsureCreated: {created} Boss!");
+                }
+                catch (Exception ex2)
+                {
+                    Console.WriteLine($"BOSS - Fallback also failed Boss: {ex2.Message} Boss - Server will still run Boss");
+                }
+            }
+            else
+            {
+                Thread.Sleep(attempt * 2000); // 2s, 4s
+            }
         }
     }
 }
@@ -165,9 +205,9 @@ app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
-app.MapGet("/", () => "IrhamTrade Server LIVE Boss! Professional Postgres Ready Boss! API: /api/dashboard /api/auth /swagger");
+app.MapGet("/", () => "IrhamTrade Server LIVE Boss! Professional Postgres Ready Boss! Firebase Sealed Boss! API: /api/dashboard /api/auth /swagger");
 app.MapHealthChecks("/health");
 
-Console.WriteLine($"Boss - Server running on port {port} Boss!");
+Console.WriteLine($"Boss - Server running on port {port} Boss! SEALED Boss!");
 
 app.Run();

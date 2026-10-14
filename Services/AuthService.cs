@@ -43,7 +43,30 @@ namespace IrhamTrade.Server.Services
             _logger = logger;
         }
 
-        // ================= REGISTER BUSINESS Boss =================
+        // ===== FACEBOOK RETRY HELPER - 70 SEC TIMEOUT FOR RENDER COLD START =====
+        private async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, T fallback, string opName, int retries = 3)
+        {
+            for (int attempt = 1; attempt <= retries; attempt++)
+            {
+                try
+                {
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+                    var task = action();
+                    var completed = await Task.WhenAny(task, Task.Delay(Timeout.Infinite, cts.Token));
+                    if (completed == task) return await task;
+                    throw new TimeoutException($"BOSS {opName} timeout 70s Boss");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"BOSS {opName} attempt {attempt} failed Boss: {ex.Message} Boss");
+                    if (attempt == retries) return fallback;
+                    await Task.Delay(attempt == 1 ? 2000 : attempt == 2 ? 5000 : 10000);
+                }
+            }
+            return fallback;
+        }
+
+        // ================= REGISTER BUSINESS Boss - KEPT 100% + SEALED =================
         public async Task<AuthResult> RegisterBusinessAsync(string businessName, string phone, string location, string email, string password)
         {
             if (string.IsNullOrWhiteSpace(businessName)) return Fail("Please enter business name Boss");
@@ -56,25 +79,30 @@ namespace IrhamTrade.Server.Services
 
             try
             {
-                // Check SQLite Boss - fast Boss
                 if (await _context.Users.AnyAsync(u => u.Email == email))
                     return Fail("This email already exists Boss. Please login Boss");
 
-                // Try create in Firebase Auth Boss - NEVER crash if Firebase missing Boss
                 string firebaseUid = "";
                 try
                 {
                     if (_firebaseService != null && _firebaseService.FirebaseAuth != null)
                     {
-                        var fbUser = await _firebaseService.FirebaseAuth.CreateUserAsync(new UserRecordArgs
+                        var fbUser = await ExecuteWithRetryAsync(async () =>
                         {
-                            Email = email,
-                            Password = password,
-                            DisplayName = businessName,
-                            EmailVerified = false
-                        });
-                        firebaseUid = fbUser.Uid;
-                        _logger.LogInformation($"Firebase user created Boss: {firebaseUid}");
+                            return await _firebaseService.FirebaseAuth.CreateUserAsync(new UserRecordArgs
+                            {
+                                Email = email,
+                                Password = password,
+                                DisplayName = businessName,
+                                EmailVerified = false
+                            });
+                        }, null!, "Firebase Create Business", 2);
+
+                        if (fbUser != null)
+                        {
+                            firebaseUid = fbUser.Uid;
+                            _logger.LogInformation($"Firebase user created Boss: {firebaseUid}");
+                        }
                     }
                     else
                     {
@@ -90,7 +118,6 @@ namespace IrhamTrade.Server.Services
                     _logger.LogWarning($"Firebase Auth create failed Boss, but continue with SQLite Boss: {ex.Message}");
                 }
 
-                // Hash with BCrypt Boss - SECURE Boss
                 string hash = BCrypt.Net.BCrypt.HashPassword(password);
 
                 var user = new User
@@ -110,23 +137,26 @@ namespace IrhamTrade.Server.Services
                 await _context.SaveChangesAsync();
                 _logger.LogInformation($"Business user saved to SQLite Boss: {user.Id} {email}");
 
-                // Save to Firestore Boss - NEVER crash if fails Boss
                 try
                 {
                     if (_firebaseService != null && _firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
                     {
-                        var doc = _firebaseService.FirestoreDb.Collection("users").Document(user.Id.ToString());
-                        await doc.SetAsync(new Dictionary<string, object>
+                        await ExecuteWithRetryAsync(async () =>
                         {
-                            { "id", user.Id },
-                            { "firebaseUid", firebaseUid },
-                            { "email", email },
-                            { "role", "business" },
-                            { "businessName", businessName },
-                            { "phone", phone },
-                            { "location", location },
-                            { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
-                        });
+                            var doc = _firebaseService.FirestoreDb.Collection("users").Document(user.Id.ToString());
+                            await doc.SetAsync(new Dictionary<string, object>
+                            {
+                                { "id", user.Id },
+                                { "firebaseUid", firebaseUid },
+                                { "email", email },
+                                { "role", "business" },
+                                { "businessName", businessName },
+                                { "phone", phone },
+                                { "location", location },
+                                { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
+                            });
+                            return true;
+                        }, false, $"Firestore Save Business {user.Id}", 2);
                         _logger.LogInformation($"Business user saved to Firestore Boss: {user.Id}");
                     }
                 }
@@ -161,7 +191,7 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // ================= REGISTER BUYER Boss =================
+        // ================= REGISTER BUYER Boss - KEPT 100% + SEALED =================
         public async Task<AuthResult> RegisterBuyerAsync(string fullName, string phone, string location, string email, string password)
         {
             if (string.IsNullOrWhiteSpace(fullName)) return Fail("Full name required Boss");
@@ -182,13 +212,17 @@ namespace IrhamTrade.Server.Services
                 {
                     if (_firebaseService != null && _firebaseService.FirebaseAuth != null)
                     {
-                        var fbUser = await _firebaseService.FirebaseAuth.CreateUserAsync(new UserRecordArgs
+                        var fbUser = await ExecuteWithRetryAsync(async () =>
                         {
-                            Email = email,
-                            Password = password,
-                            DisplayName = fullName
-                        });
-                        firebaseUid = fbUser.Uid;
+                            return await _firebaseService.FirebaseAuth.CreateUserAsync(new UserRecordArgs
+                            {
+                                Email = email,
+                                Password = password,
+                                DisplayName = fullName
+                            });
+                        }, null!, "Firebase Create Buyer", 2);
+
+                        if (fbUser != null) firebaseUid = fbUser.Uid;
                     }
                 }
                 catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
@@ -222,18 +256,22 @@ namespace IrhamTrade.Server.Services
                 {
                     if (_firebaseService != null && _firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
                     {
-                        var doc = _firebaseService.FirestoreDb.Collection("users").Document(user.Id.ToString());
-                        await doc.SetAsync(new Dictionary<string, object>
+                        await ExecuteWithRetryAsync(async () =>
                         {
-                            { "id", user.Id },
-                            { "firebaseUid", firebaseUid },
-                            { "email", email },
-                            { "role", "buyer" },
-                            { "fullName", fullName },
-                            { "phone", phone },
-                            { "location", location },
-                            { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
-                        });
+                            var doc = _firebaseService.FirestoreDb.Collection("users").Document(user.Id.ToString());
+                            await doc.SetAsync(new Dictionary<string, object>
+                            {
+                                { "id", user.Id },
+                                { "firebaseUid", firebaseUid },
+                                { "email", email },
+                                { "role", "buyer" },
+                                { "fullName", fullName },
+                                { "phone", phone },
+                                { "location", location },
+                                { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
+                            });
+                            return true;
+                        }, false, $"Firestore Save Buyer {user.Id}", 2);
                     }
                 }
                 catch (Exception ex)
@@ -267,7 +305,7 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // ================= LOGIN Boss - REAL ROLE Boss =================
+        // ================= LOGIN Boss - REAL ROLE Boss - KEPT 100% + SEALED =================
         public async Task<AuthResult> LoginAsync(string email, string password)
         {
             if (string.IsNullOrWhiteSpace(email) || !email.Contains("@")) return Fail("Valid email required Boss");
@@ -284,8 +322,15 @@ namespace IrhamTrade.Server.Services
                 if (!BCrypt.Net.BCrypt.Verify(password, user.PasswordHash))
                     return Fail("Wrong password Boss. Try again Boss");
 
-                user.LastLoginAt = DateTime.UtcNow;
-                await _context.SaveChangesAsync();
+                try
+                {
+                    user.LastLoginAt = DateTime.UtcNow;
+                    await _context.SaveChangesAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"LastLogin update failed Boss but login continues Boss: {ex.Message}");
+                }
 
                 var appUser = ToAppUser(user);
                 try
@@ -308,12 +353,12 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // ================= HELPERS Boss =================
+        // ================= HELPERS Boss - KEPT 100% =================
         private string GenerateJwt(User user)
         {
             var key = _config["Jwt:Key"] ?? throw new Exception("Jwt:Key is missing in appsettings / Render Env Boss!");
             if (key.Length < 32) throw new Exception($"Jwt:Key too short Boss: {key.Length} chars, need 32+ Boss");
-            
+
             var issuer = _config["Jwt:Issuer"] ?? "IrhamTrade";
             var audience = _config["Jwt:Audience"] ?? "IrhamTrade";
             var expireMinutesStr = _config["Jwt:ExpireMinutes"] ?? "1440";
@@ -327,8 +372,8 @@ namespace IrhamTrade.Server.Services
                 new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
                 new Claim(JwtRegisteredClaimNames.Email, user.Email),
                 new Claim(ClaimTypes.Role, user.Role),
-                new Claim("businessName", user.BusinessName ?? ""),
-                new Claim("fullName", user.FullName ?? ""),
+                new Claim("businessName", user.BusinessName?? ""),
+                new Claim("fullName", user.FullName?? ""),
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
             };
 

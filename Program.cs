@@ -15,8 +15,8 @@ builder.WebHost.UseUrls($"http://+:{port}");
 
 // ===== BOSS PROFESSIONAL DataProtection Boss =====
 builder.Services.AddDataProtection()
-   .PersistKeysToFileSystem(new DirectoryInfo("/tmp/keys"))
-   .SetApplicationName("IrhamTrade");
+  .PersistKeysToFileSystem(new DirectoryInfo("/tmp/keys"))
+  .SetApplicationName("IrhamTrade");
 
 // ===== BOSS PROFESSIONAL DATABASE Boss - FIXED Boss =====
 var postgresUrl = Environment.GetEnvironmentVariable("DATABASE_URL") ?? Environment.GetEnvironmentVariable("DATABASE_INTERNAL_URL");
@@ -59,15 +59,20 @@ else
     Console.WriteLine($"BOSS - Using SQLITE for Local/Test Boss - NOT FOR PRODUCTION Boss");
 }
 
-// FIREBASE Boss - STRONG LINK Boss
+// ===== BOSS FIX 100% - ALL SERVICES REGISTERED Boss =====
 builder.Services.AddSingleton<FirebaseService>();
 builder.Services.AddScoped<AuthService>();
+builder.Services.AddScoped<DashboardService>();
+builder.Services.AddScoped<FirestoreSercice>();
+builder.Services.AddScoped<FirebaseService>(); // Keep for compatibility Boss
+builder.Services.AddHttpClient();
 
 // JWT Boss
 var jwtKey = builder.Configuration["Jwt:Key"]
-         ?? builder.Configuration["Jwt__Key"]
-         ?? Environment.GetEnvironmentVariable("Jwt__Key")
-         ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
+        ?? builder.Configuration["Jwt__Key"]
+        ?? Environment.GetEnvironmentVariable("Jwt__Key")
+        ?? Environment.GetEnvironmentVariable("JWT_KEY")
+        ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
 
 var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "IrhamTrade";
 var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTradeUsers";
@@ -75,19 +80,19 @@ var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTradeUsers";
 Console.WriteLine($"BOSS JWT Key exists: {!string.IsNullOrEmpty(jwtKey)} Length: {jwtKey.Length} Boss");
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-   .AddJwtBearer(options =>
-   {
-       options.TokenValidationParameters = new TokenValidationParameters
-       {
-           ValidateIssuer = true,
-           ValidateAudience = true,
-           ValidateLifetime = true,
-           ValidateIssuerSigningKey = true,
-           ValidIssuer = jwtIssuer,
-           ValidAudience = jwtAudience,
-           IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
-       };
-   });
+  .AddJwtBearer(options =>
+  {
+      options.TokenValidationParameters = new TokenValidationParameters
+      {
+          ValidateIssuer = true,
+          ValidateAudience = true,
+          ValidateLifetime = true,
+          ValidateIssuerSigningKey = true,
+          ValidIssuer = jwtIssuer,
+          ValidAudience = jwtAudience,
+          IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+      };
+  });
 
 builder.Services.AddAuthorization();
 builder.Services.AddControllers();
@@ -143,7 +148,7 @@ app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
-app.MapGet("/", () => "IrhamTrade Server LIVE Boss! Professional Postgres Ready Boss!");
+app.MapGet("/", () => "IrhamTrade Server LIVE Boss! Professional Postgres Ready Boss! API: /api/dashboard /api/auth /swagger");
 app.MapHealthChecks("/health");
 
 Console.WriteLine($"Boss - Server running on port {port} Boss!");

@@ -39,21 +39,22 @@ namespace IrhamTrade.Server.Services
         private static string GetString(Dictionary<string, object> data, string key)
         {
             if (data.TryGetValue(key, out var v) && v != null) return v.ToString()?.Trim() ?? "";
-            // case-insensitive
             foreach (var kv in data)
                 if (kv.Key.Equals(key, StringComparison.OrdinalIgnoreCase) && kv.Value != null)
                     return kv.Value.ToString()?.Trim() ?? "";
             return "";
         }
 
-        // ================= DEVICES =================
+        // ================= DEVICES - LIVE FEED FOR ALL BUYERS =================
         public async Task<List<Dictionary<string, object>>> GetAllDevicesAsync()
         {
             return await ExecuteWithRetryAsync(async () =>
             {
                 try
                 {
-                    var snap = await _db.Collection("devices").OrderByDescending("createdAt").Limit(500).GetSnapshotAsync();
+                    var snap = await _db.Collection("devices").WhereEqualTo("status", "active").OrderByDescending("createdAt").Limit(500).GetSnapshotAsync();
+                    if (snap.Count == 0)
+                        snap = await _db.Collection("devices").OrderByDescending("createdAt").Limit(500).GetSnapshotAsync();
                     return snap.Documents.Select(doc => { var d = doc.ToDictionary(); d["id"] = doc.Id; d["deviceId"] = doc.Id; return d; }).ToList();
                 }
                 catch
@@ -87,23 +88,30 @@ namespace IrhamTrade.Server.Services
             if (data == null) throw new ArgumentNullException(nameof(data));
             return await ExecuteWithRetryAsync(async () =>
             {
-                // Strong one-to-one mapping with APK UploadPage
                 var name = GetString(data, "name");
                 if (string.IsNullOrWhiteSpace(name)) name = GetString(data, "model");
+                if (string.IsNullOrWhiteSpace(name)) name = GetString(data, "productName");
                 if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Device name is required");
 
                 var brand = GetString(data, "brand");
                 var price = GetString(data, "price");
+                var priceNum = GetString(data, "productPrice");
+                if (string.IsNullOrWhiteSpace(price)) price = priceNum;
                 var contactNumber = GetString(data, "contactNumber");
                 if (string.IsNullOrWhiteSpace(contactNumber)) contactNumber = GetString(data, "contact");
+                if (string.IsNullOrWhiteSpace(contactNumber)) contactNumber = GetString(data, "phone");
                 var businessId = GetString(data, "businessId");
                 if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "business_id");
+                if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "ownerId");
                 var businessName = GetString(data, "businessName");
                 var description = GetString(data, "description");
                 if (string.IsNullOrWhiteSpace(description)) description = name;
                 var imageBase64 = GetString(data, "imageBase64");
                 if (string.IsNullOrWhiteSpace(imageBase64)) imageBase64 = GetString(data, "image");
                 if (string.IsNullOrWhiteSpace(imageBase64)) imageBase64 = GetString(data, "imageUrl");
+                var location = GetString(data, "location");
+                var category = GetString(data, "category");
+                if (string.IsNullOrWhiteSpace(category)) category = "General";
 
                 var docId = GetString(data, "id");
                 if (string.IsNullOrWhiteSpace(docId)) docId = Guid.NewGuid().ToString("N");
@@ -111,27 +119,38 @@ namespace IrhamTrade.Server.Services
                 var firestoreData = new Dictionary<string, object>
                 {
                     ["id"] = docId,
-                    ["Id"] = docId,
+                    ["deviceId"] = docId,
                     ["name"] = name,
+                    ["productName"] = name,
                     ["model"] = name,
                     ["brand"] = brand,
+                    ["category"] = category,
                     ["price"] = price,
+                    ["productPrice"] = price,
                     ["contactNumber"] = contactNumber,
-                    ["contact"] = contactNumber,
                     ["businessId"] = businessId,
+                    ["ownerId"] = businessId,
                     ["businessName"] = businessName,
                     ["description"] = description,
                     ["status"] = "active",
+                    ["isAvailable"] = true,
+                    ["isActive"] = true,
                     ["imageBase64"] = imageBase64,
                     ["image"] = imageBase64,
                     ["imageUrl"] = imageBase64,
                     ["hasImage"] = !string.IsNullOrWhiteSpace(imageBase64),
+                    ["location"] = location,
+                    ["stock"] = 100,
                     ["createdAt"] = Timestamp.GetCurrentTimestamp(),
                     ["updatedAt"] = Timestamp.GetCurrentTimestamp()
                 };
 
                 await _db.Collection("devices").Document(docId).SetAsync(firestoreData);
-                _logger.LogInformation("Device created {DeviceId} Brand {Brand} Business {BusinessId}", docId, brand, businessId);
+
+                // Also save to products collection for compatibility - so buyer sees LIVE in both
+                try { await _db.Collection("products").Document(docId).SetAsync(firestoreData, SetOptions.MergeAll); } catch { }
+
+                _logger.LogInformation("Device created LIVE {DeviceId} {Name} Business {BusinessId}", docId, name, businessId);
                 return docId;
             }, null!, "CreateDevice");
         }
@@ -144,10 +163,10 @@ namespace IrhamTrade.Server.Services
                 var update = new Dictionary<string, object>();
                 foreach (var kv in data)
                 {
-                    if (kv.Key.Equals("imageBase64", StringComparison.OrdinalIgnoreCase) || kv.Key.Equals("image", StringComparison.OrdinalIgnoreCase))
+                    if (kv.Key.Equals("imageBase64", StringComparison.OrdinalIgnoreCase) || kv.Key.Equals("image", StringComparison.OrdinalIgnoreCase) || kv.Key.Equals("imageUrl", StringComparison.OrdinalIgnoreCase))
                     {
                         var img = kv.Value?.ToString() ?? "";
-                        if (img.Length > 100)
+                        if (img.Length > 20)
                         {
                             update["imageBase64"] = img;
                             update["imageUrl"] = img;
@@ -162,6 +181,7 @@ namespace IrhamTrade.Server.Services
                 }
                 update["updatedAt"] = Timestamp.GetCurrentTimestamp();
                 await _db.Collection("devices").Document(deviceId).SetAsync(update, SetOptions.MergeAll);
+                try { await _db.Collection("products").Document(deviceId).SetAsync(update, SetOptions.MergeAll); } catch { }
                 return true;
             }, false, $"UpdateDevice {deviceId}");
         }
@@ -172,6 +192,7 @@ namespace IrhamTrade.Server.Services
             return await ExecuteWithRetryAsync(async () =>
             {
                 await _db.Collection("devices").Document(deviceId).DeleteAsync();
+                try { await _db.Collection("products").Document(deviceId).DeleteAsync(); } catch { }
                 return true;
             }, false, $"DeleteDevice {deviceId}");
         }
@@ -269,6 +290,7 @@ namespace IrhamTrade.Server.Services
             {
                 data["updatedAt"] = Timestamp.GetCurrentTimestamp();
                 await _db.Collection("users").Document(buyerId).SetAsync(data, SetOptions.MergeAll);
+                try { await _db.Collection("buyers").Document(buyerId).SetAsync(data, SetOptions.MergeAll); } catch { }
                 return true;
             }, false, $"UpdateBuyerProfile {buyerId}");
         }

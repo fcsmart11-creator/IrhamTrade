@@ -47,8 +47,10 @@ namespace IrhamTrade.Server.Controllers
                     role = result.User.Role,
                     business_name = result.User.BusinessName,
                     user_email = result.User.Email,
+                    user_id = result.User.Id,
                     user = result.User,
-                    token = result.User.Token
+                    token = result.User.Token,
+                    id = result.User.Id
                 });
             }
             catch (Exception ex)
@@ -84,8 +86,10 @@ namespace IrhamTrade.Server.Controllers
                     buyer_name = result.User.FullName,
                     fullName = result.User.FullName,
                     user_email = result.User.Email,
+                    user_id = result.User.Id,
                     user = result.User,
-                    token = result.User.Token
+                    token = result.User.Token,
+                    id = result.User.Id
                 });
             }
             catch (Exception ex)
@@ -123,8 +127,10 @@ namespace IrhamTrade.Server.Controllers
                     buyer_name = result.User.FullName,
                     fullName = result.User.FullName,
                     user_email = result.User.Email,
+                    user_id = result.User.Id,
                     user = result.User,
-                    token = result.User.Token
+                    token = result.User.Token,
+                    id = result.User.Id
                 });
             }
             catch (Exception ex)
@@ -133,9 +139,97 @@ namespace IrhamTrade.Server.Controllers
                 return StatusCode(500, new { success = false, message = "Unable to log in right now. Please check your connection and try again" });
             }
         }
+
+        // =========================================================
+        // REAL FORGOT PASSWORD - LIKE FACEBOOK / TIKTOK BACKEND
+        // =========================================================
+        [HttpPost("forgot-password")]
+        public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.Email) || !req.Email.Contains("@"))
+                    return BadRequest(new { success = false, message = "Please enter a valid email address" });
+
+                _logger.LogInformation("ForgotPassword attempt: {Email}", req.Email);
+                var result = await _authService.ForgotPasswordAsync(req.Email);
+
+                if (!result.Success)
+                    return BadRequest(new { success = false, message = result.Message });
+
+                // Always return success even if email not found - security best practice like Facebook
+                return Ok(new { success = true, message = result.Message, email = req.Email.Trim().ToLowerInvariant() });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "ForgotPassword error");
+                return StatusCode(500, new { success = false, message = "Unable to process request. Try again." });
+            }
+        }
+
+        [HttpPost("reset-password")]
+        public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.NewPassword))
+                    return BadRequest(new { success = false, message = "Email and new password required" });
+                if (req.NewPassword.Length < 6)
+                    return BadRequest(new { success = false, message = "Password must be at least 6 characters" });
+
+                var result = await _authService.ResetPasswordAsync(req.Email, req.NewPassword);
+                if (!result.Success)
+                    return BadRequest(new { success = false, message = result.Message });
+
+                return Ok(new { success = true, message = result.Message });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "ResetPassword error");
+                return StatusCode(500, new { success = false, message = "Unable to reset password. Try again." });
+            }
+        }
+
+        // =========================================================
+        // REAL LOGOUT - INVALIDATES TOKEN LIKE FACEBOOK
+        // So 1 phone can switch roles clean
+        // =========================================================
+        [HttpPost("logout")]
+        public async Task<IActionResult> Logout()
+        {
+            try
+            {
+                var token = Request.Headers["Authorization"].ToString().Replace("Bearer ", "").Trim();
+                if (!string.IsNullOrWhiteSpace(token))
+                    await _authService.LogoutAsync(token);
+
+                return Ok(new { success = true, message = "Logged out successfully" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Logout error");
+                return Ok(new { success = true, message = "Logged out" }); // Always succeed logout like Facebook
+            }
+        }
+
+        [HttpGet("validate")]
+        public async Task<IActionResult> ValidateToken()
+        {
+            var token = Request.Headers["Authorization"].ToString().Replace("Bearer ", "").Trim();
+            if (string.IsNullOrWhiteSpace(token))
+                return Unauthorized(new { success = false, message = "No token" });
+
+            var isValid = await _authService.ValidateTokenAsync(token);
+            if (!isValid)
+                return Unauthorized(new { success = false, message = "Token invalid or expired" });
+
+            return Ok(new { success = true, message = "Token valid" });
+        }
     }
 
     public class RegisterBusinessRequest { public string BusinessName { get; set; } = ""; public string Phone { get; set; } = ""; public string Location { get; set; } = ""; public string Email { get; set; } = ""; public string Password { get; set; } = ""; }
     public class RegisterBuyerRequest { public string FullName { get; set; } = ""; public string Phone { get; set; } = ""; public string Location { get; set; } = ""; public string Email { get; set; } = ""; public string Password { get; set; } = ""; }
     public class LoginRequest { public string Email { get; set; } = ""; public string Password { get; set; } = ""; }
+    public class ForgotPasswordRequest { public string Email { get; set; } = ""; }
+    public class ResetPasswordRequest { public string Email { get; set; } = ""; public string NewPassword { get; set; } = ""; }
 }

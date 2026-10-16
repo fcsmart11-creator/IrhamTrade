@@ -8,6 +8,7 @@ using IrhamTrade.Server.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// ================= PORT & DATAPROTECTION =================
 var port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
@@ -16,14 +17,15 @@ try
     var keysPath = "/tmp/keys";
     Directory.CreateDirectory(keysPath);
     builder.Services.AddDataProtection()
-    .PersistKeysToFileSystem(new DirectoryInfo(keysPath))
-    .SetApplicationName("IrhamTrade");
+       .PersistKeysToFileSystem(new DirectoryInfo(keysPath))
+       .SetApplicationName("IrhamTrade");
 }
 catch
 {
     builder.Services.AddDataProtection().SetApplicationName("IrhamTrade");
 }
 
+// ================= DATABASE - POSTGRES OR SQLITE =================
 var postgresUrl = Environment.GetEnvironmentVariable("DATABASE_URL") ?? Environment.GetEnvironmentVariable("DATABASE_INTERNAL_URL");
 var connStr = builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=/tmp/irhamtrade.db";
 
@@ -53,20 +55,28 @@ else
     builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlite(connStr));
 }
 
+// ================= SERVICES =================
 builder.Services.AddSingleton<FirebaseService>();
 builder.Services.AddScoped<AuthService>();
-builder.Services.AddScoped<DashboardService>();
 builder.Services.AddScoped<FirestoreService>();
+builder.Services.AddScoped<DashboardService>();
 builder.Services.AddHttpClient();
 
+// ================= JWT =================
 var jwtKey = builder.Configuration["Jwt:Key"]
- ?? builder.Configuration["Jwt__Key"]
- ?? Environment.GetEnvironmentVariable("Jwt__Key")
- ?? Environment.GetEnvironmentVariable("JWT_KEY")
- ?? "IrhamTrade-Dev-Key-Only-Not-For-Prod-32-Chars-Min-2026!";
+   ?? builder.Configuration["Jwt__Key"]
+   ?? Environment.GetEnvironmentVariable("Jwt__Key")
+   ?? Environment.GetEnvironmentVariable("JWT_KEY")
+   ?? "IrhamTrade-Dev-Key-Only-Not-For-Prod-32-Chars-Min-2026!";
 
 var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "IrhamTrade.Server";
 var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTrade.App";
+
+if (jwtKey.Length < 32)
+{
+    Console.WriteLine("JWT Key too short - using fallback");
+    jwtKey = "IrhamTrade-Dev-Key-Only-Not-For-Prod-32-Chars-Min-2026!";
+}
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 .AddJwtBearer(options =>
@@ -79,12 +89,21 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         ValidateIssuerSigningKey = true,
         ValidIssuer = jwtIssuer,
         ValidAudience = jwtAudience,
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
+        ClockSkew = TimeSpan.FromMinutes(2)
+    };
+    options.Events = new JwtBearerEvents
+    {
+        OnAuthenticationFailed = context =>
+        {
+            Console.WriteLine($"JWT Auth failed: {context.Exception.Message}");
+            return Task.CompletedTask;
+        }
     };
 });
 
 builder.Services.AddAuthorization();
-builder.Services.AddControllers();
+builder.Services.AddControllers().AddJsonOptions(o => o.JsonSerializerOptions.PropertyNamingPolicy = null);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddCors(options =>
@@ -95,6 +114,7 @@ builder.Services.AddHealthChecks();
 
 var app = builder.Build();
 
+// ================= MIDDLEWARE =================
 app.UseExceptionHandler(errorApp =>
 {
     errorApp.Run(async context =>
@@ -117,9 +137,11 @@ app.MapGet("/health/detailed", (AppDbContext db, FirebaseService fb) =>
         framework = ".NET 10",
         database = dbOk ? "connected" : "connecting",
         firebase = fb.IsInitialized ? "connected" : "connecting",
+        project = fb.ProjectId,
         time = DateTime.UtcNow
     });
 });
+app.MapGet("/api/Auth/status", (FirebaseService fb) => Results.Ok(new { status = "Auth Ready", firebase = fb.IsInitialized ? "connected" : "sqlite-only", time = DateTime.UtcNow }));
 
 app.UseSwagger();
 app.UseSwaggerUI();
@@ -128,6 +150,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
+// ================= DATABASE INIT =================
 using (var scope = app.Services.CreateScope())
 {
     for (int attempt = 1; attempt <= 3; attempt++)
@@ -176,5 +199,5 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-app.Logger.LogInformation("Server running on port {Port} with.NET 10", port);
-app.Run();
+app.Logger.LogInformation("Server running on port {Port} with.NET 10 Project irhamtrade-31ca6", port);
+app.Run(); 

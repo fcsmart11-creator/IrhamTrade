@@ -11,10 +11,11 @@ namespace IrhamTrade.Server.Controllers
         private readonly ILogger<DevicesController> _logger;
         public DevicesController(DashboardService svc, ILogger<DevicesController> logger) { _svc = svc; _logger = logger; }
 
+        // GET api/Devices - LIVE feed for ALL buyers - like Jiji browsing
         [HttpGet]
         public async Task<IActionResult> GetAll()
         {
-            try { return Ok(await _svc.GetAllDevicesAsync()); }
+            try { var devices = await _svc.GetAllDevicesAsync(); return Ok(devices); }
             catch (Exception ex) { _logger.LogError(ex, "GetAll Devices failed"); return Ok(new List<Dictionary<string, object>>()); }
         }
 
@@ -32,10 +33,10 @@ namespace IrhamTrade.Server.Controllers
             {
                 if (data == null || data.Count == 0) return BadRequest(new { success = false, message = "Device data is required" });
                 var id = await _svc.CreateDeviceAsync(data);
-                if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to create device. Please try again" });
-                return Ok(new { success = true, id, message = "Device created successfully" });
+                if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to create device" });
+                return Ok(new { success = true, id, message = "Device created LIVE" });
             }
-            catch (Exception ex) { _logger.LogError(ex, "Create Device failed"); return StatusCode(500, new { success = false, message = "Unable to create device. Please try again" }); }
+            catch (Exception ex) { _logger.LogError(ex, "Create Device failed"); return StatusCode(500, new { success = false, message = "Unable to create device" }); }
         }
 
         [HttpPut("{deviceId}")]
@@ -91,7 +92,7 @@ namespace IrhamTrade.Server.Controllers
                 if (data == null) return BadRequest(new { success = false, message = "Interest data is required" });
                 var id = await _svc.CreateInterestAsync(data);
                 if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to submit interest" });
-                return Ok(new { success = true, id, message = "Interest submitted successfully" });
+                return Ok(new { success = true, id, message = "Interest submitted" });
             }
             catch (Exception ex) { _logger.LogError(ex, "Create interest failed"); return StatusCode(500, new { success = false, message = "Unable to submit interest" }); }
         }

@@ -19,14 +19,7 @@ namespace IrhamTrade.Server.Controllers
         [HttpGet]
         public IActionResult Status()
         {
-            try
-            {
-                return Ok(new { message = "IrhamTrade Auth running Boss! Facebook sealed Boss!", project = "irhamtrade-31ca6", ready = true, time = DateTime.UtcNow, sealedVersion = "1000% Boss" });
-            }
-            catch
-            {
-                return Ok(new { message = "Auth running Boss!", ready = true });
-            }
+            return Ok(new { message = "IrhamTrade Auth service running", project = "irhamtrade-31ca6", ready = true, time = DateTime.UtcNow });
         }
 
         [HttpPost("register-business")]
@@ -35,18 +28,17 @@ namespace IrhamTrade.Server.Controllers
             try
             {
                 if (req == null || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.Password) || string.IsNullOrWhiteSpace(req.BusinessName))
-                    return BadRequest(new { success = false, message = "Please provide all required fields Boss. Business name, email, password Boss needed Boss." });
+                    return BadRequest(new { success = false, message = "Please provide business name, email and password" });
 
-                _logger.LogInformation($"RegisterBusiness Boss: {req.Email} - {req.BusinessName}");
+                _logger.LogInformation("RegisterBusiness attempt: {Email}", req.Email);
                 var result = await _authService.RegisterBusinessAsync(req.BusinessName, req.Phone, req.Location, req.Email, req.Password);
 
                 if (!result.Success)
                 {
-                    _logger.LogWarning($"RegisterBusiness Failed Boss {req.Email}: {result.Message}");
+                    _logger.LogWarning("RegisterBusiness failed {Email}: {Message}", req.Email, result.Message);
                     return BadRequest(new { success = false, message = result.Message });
                 }
 
-                _logger.LogInformation($"RegisterBusiness Success Boss {req.Email}");
                 return Ok(new
                 {
                     success = true,
@@ -61,8 +53,8 @@ namespace IrhamTrade.Server.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"RegisterBusiness CRASH Boss {req?.Email}: {ex.Message} - But server still alive Boss");
-                return StatusCode(500, new { success = false, message = $"Server busy Boss, try again Boss. Real: {ex.Message} Boss" });
+                _logger.LogError(ex, "RegisterBusiness unexpected error");
+                return StatusCode(500, new { success = false, message = "Server is busy at the moment. Please wait a moment and try again" });
             }
         }
 
@@ -72,14 +64,14 @@ namespace IrhamTrade.Server.Controllers
             try
             {
                 if (req == null || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.Password) || string.IsNullOrWhiteSpace(req.FullName))
-                    return BadRequest(new { success = false, message = "Please provide all required fields Boss. Full name, email, password Boss needed Boss." });
+                    return BadRequest(new { success = false, message = "Please provide full name, email and password" });
 
-                _logger.LogInformation($"RegisterBuyer Boss: {req.Email}");
+                _logger.LogInformation("RegisterBuyer attempt: {Email}", req.Email);
                 var result = await _authService.RegisterBuyerAsync(req.FullName, req.Phone, req.Location, req.Email, req.Password);
 
                 if (!result.Success)
                 {
-                    _logger.LogWarning($"RegisterBuyer Failed Boss {req.Email}: {result.Message}");
+                    _logger.LogWarning("RegisterBuyer failed {Email}: {Message}", req.Email, result.Message);
                     return BadRequest(new { success = false, message = result.Message });
                 }
 
@@ -98,8 +90,8 @@ namespace IrhamTrade.Server.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"RegisterBuyer CRASH Boss {req?.Email}: {ex.Message} - Server alive Boss");
-                return StatusCode(500, new { success = false, message = $"Server busy Boss, try again Boss. Real: {ex.Message} Boss" });
+                _logger.LogError(ex, "RegisterBuyer unexpected error");
+                return StatusCode(500, new { success = false, message = "Server is busy at the moment. Please try again shortly" });
             }
         }
 
@@ -109,14 +101,14 @@ namespace IrhamTrade.Server.Controllers
             try
             {
                 if (req == null || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.Password))
-                    return BadRequest(new { success = false, message = "Please enter email and password Boss." });
+                    return BadRequest(new { success = false, message = "Please enter email and password" });
 
-                _logger.LogInformation($"Login attempt Boss: {req.Email}");
+                _logger.LogInformation("Login attempt: {Email}", req.Email);
                 var result = await _authService.LoginAsync(req.Email, req.Password);
 
                 if (!result.Success)
                 {
-                    _logger.LogWarning($"Login Failed Boss {req.Email}: {result.Message}");
+                    _logger.LogWarning("Login failed {Email}: {Message}", req.Email, result.Message);
                     return Unauthorized(new { success = false, message = result.Message });
                 }
 
@@ -137,8 +129,8 @@ namespace IrhamTrade.Server.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"Login CRASH Boss {req?.Email}: {ex.Message} - Server alive Boss");
-                return StatusCode(500, new { success = false, message = $"Server busy Boss, try again Boss. Wait 40 seconds Boss if first time Boss. Real: {ex.Message} Boss" });
+                _logger.LogError(ex, "Login unexpected error");
+                return StatusCode(500, new { success = false, message = "Unable to log in right now. Please check your connection and try again" });
             }
         }
     }

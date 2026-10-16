@@ -9,40 +9,20 @@ namespace IrhamTrade.Server.Controllers
     {
         private readonly DashboardService _svc;
         private readonly ILogger<DevicesController> _logger;
-        public DevicesController(DashboardService svc, ILogger<DevicesController> logger)
-        {
-            _svc = svc;
-            _logger = logger;
-        }
+        public DevicesController(DashboardService svc, ILogger<DevicesController> logger) { _svc = svc; _logger = logger; }
 
         [HttpGet]
         public async Task<IActionResult> GetAll()
         {
-            try
-            {
-                var list = await _svc.GetAllDevicesAsync();
-                return Ok(list);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetAll Devices FAIL Boss");
-                return Ok(new List<Dictionary<string, object>>()); // Facebook - return empty not crash
-            }
+            try { return Ok(await _svc.GetAllDevicesAsync()); }
+            catch (Exception ex) { _logger.LogError(ex, "GetAll Devices failed"); return Ok(new List<Dictionary<string, object>>()); }
         }
 
         [HttpGet("business/{businessId}")]
         public async Task<IActionResult> GetByBusiness(string businessId)
         {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(businessId)) return Ok(new List<Dictionary<string, object>>());
-                return Ok(await _svc.GetDevicesByBusinessAsync(businessId));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetByBusiness FAIL Boss {BusinessId}", businessId);
-                return Ok(new List<Dictionary<string, object>>());
-            }
+            try { if (string.IsNullOrWhiteSpace(businessId)) return Ok(new List<Dictionary<string, object>>()); return Ok(await _svc.GetDevicesByBusinessAsync(businessId)); }
+            catch (Exception ex) { _logger.LogError(ex, "GetByBusiness failed {BusinessId}", businessId); return Ok(new List<Dictionary<string, object>>()); }
         }
 
         [HttpPost]
@@ -50,16 +30,12 @@ namespace IrhamTrade.Server.Controllers
         {
             try
             {
-                if (data == null) return BadRequest(new { message = "Data required Boss" });
+                if (data == null || data.Count == 0) return BadRequest(new { success = false, message = "Device data is required" });
                 var id = await _svc.CreateDeviceAsync(data);
-                if (string.IsNullOrEmpty(id)) return StatusCode(500, new { message = "Create failed Boss - Try again Boss" });
-                return Ok(new { id, message = "Device created Boss!" });
+                if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to create device. Please try again" });
+                return Ok(new { success = true, id, message = "Device created successfully" });
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Create Device FAIL Boss: {Message}", ex.Message);
-                return StatusCode(500, new { message = $"Create failed Boss: {ex.Message} Boss", error = ex.Message });
-            }
+            catch (Exception ex) { _logger.LogError(ex, "Create Device failed"); return StatusCode(500, new { success = false, message = "Unable to create device. Please try again" }); }
         }
 
         [HttpPut("{deviceId}")]
@@ -67,15 +43,11 @@ namespace IrhamTrade.Server.Controllers
         {
             try
             {
-                if (string.IsNullOrWhiteSpace(deviceId) || data == null) return BadRequest(new { message = "deviceId and data required Boss" });
+                if (string.IsNullOrWhiteSpace(deviceId)) return BadRequest(new { success = false, message = "Device ID is required" });
                 var ok = await _svc.UpdateDeviceAsync(deviceId, data);
-                return ok ? Ok(new { message = "Updated Boss" }) : NotFound(new { message = $"Device {deviceId} not found Boss" });
+                return ok ? Ok(new { success = true, message = "Device updated" }) : NotFound(new { success = false, message = "Device not found" });
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Update Device FAIL Boss {DeviceId}", deviceId);
-                return StatusCode(500, new { message = $"Update failed Boss: {ex.Message} Boss" });
-            }
+            catch (Exception ex) { _logger.LogError(ex, "Update failed {DeviceId}", deviceId); return StatusCode(500, new { success = false, message = "Unable to update device" }); }
         }
 
         [HttpDelete("{deviceId}")]
@@ -83,15 +55,11 @@ namespace IrhamTrade.Server.Controllers
         {
             try
             {
-                if (string.IsNullOrWhiteSpace(deviceId)) return BadRequest(new { message = "deviceId required Boss" });
+                if (string.IsNullOrWhiteSpace(deviceId)) return BadRequest(new { success = false, message = "Device ID is required" });
                 var ok = await _svc.DeleteDeviceAsync(deviceId);
-                return ok ? Ok(new { message = "Deleted Boss" }) : NotFound(new { message = $"Device {deviceId} not found Boss" });
+                return ok ? Ok(new { success = true, message = "Device deleted" }) : NotFound(new { success = false, message = "Device not found" });
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Delete Device FAIL Boss {DeviceId}", deviceId);
-                return StatusCode(500, new { message = $"Delete failed Boss: {ex.Message} Boss" });
-            }
+            catch (Exception ex) { _logger.LogError(ex, "Delete failed {DeviceId}", deviceId); return StatusCode(500, new { success = false, message = "Unable to delete device" }); }
         }
     }
 
@@ -101,28 +69,18 @@ namespace IrhamTrade.Server.Controllers
     {
         private readonly DashboardService _svc;
         private readonly ILogger<InterestsController> _logger;
-        public InterestsController(DashboardService svc, ILogger<InterestsController> logger)
-        {
-            _svc = svc;
-            _logger = logger;
-        }
+        public InterestsController(DashboardService svc, ILogger<InterestsController> logger) { _svc = svc; _logger = logger; }
 
         [HttpGet]
         public async Task<IActionResult> GetAll([FromQuery] string? businessId, [FromQuery] string? buyerId)
         {
             try
             {
-                if (!string.IsNullOrEmpty(businessId))
-                    return Ok(await _svc.GetBusinessInterestsAsync(businessId));
-                if (!string.IsNullOrEmpty(buyerId))
-                    return Ok(await _svc.GetBuyerInterestsAsync(buyerId));
-                return BadRequest(new { message = "businessId or buyerId required Boss" });
+                if (!string.IsNullOrEmpty(businessId)) return Ok(await _svc.GetBusinessInterestsAsync(businessId));
+                if (!string.IsNullOrEmpty(buyerId)) return Ok(await _svc.GetBuyerInterestsAsync(buyerId));
+                return BadRequest(new { success = false, message = "Business ID or Buyer ID is required" });
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetAll Interests FAIL Boss");
-                return Ok(new List<Dictionary<string, object>>());
-            }
+            catch (Exception ex) { _logger.LogError(ex, "Get interests failed"); return Ok(new List<Dictionary<string, object>>()); }
         }
 
         [HttpPost]
@@ -130,76 +88,34 @@ namespace IrhamTrade.Server.Controllers
         {
             try
             {
-                if (data == null) return BadRequest(new { message = "Data required Boss" });
+                if (data == null) return BadRequest(new { success = false, message = "Interest data is required" });
                 var id = await _svc.CreateInterestAsync(data);
-                if (string.IsNullOrEmpty(id)) return StatusCode(500, new { message = "Interest create failed Boss" });
-                return Ok(new { id, message = "Interest submitted Boss!" });
+                if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to submit interest" });
+                return Ok(new { success = true, id, message = "Interest submitted successfully" });
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Create Interest FAIL Boss");
-                return StatusCode(500, new { message = $"Interest failed Boss: {ex.Message} Boss" });
-            }
+            catch (Exception ex) { _logger.LogError(ex, "Create interest failed"); return StatusCode(500, new { success = false, message = "Unable to submit interest" }); }
         }
 
         [HttpGet("buyer/{buyerId}")]
-        public async Task<IActionResult> GetByBuyer(string buyerId)
-        {
-            try
-            {
-                return Ok(await _svc.GetBuyerInterestsAsync(buyerId));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetByBuyer FAIL Boss {BuyerId}", buyerId);
-                return Ok(new List<Dictionary<string, object>>());
-            }
-        }
+        public async Task<IActionResult> GetByBuyer(string buyerId) => Ok(await _svc.GetBuyerInterestsAsync(buyerId));
 
         [HttpGet("business/{businessId}")]
-        public async Task<IActionResult> GetByBusiness(string businessId)
-        {
-            try
-            {
-                return Ok(await _svc.GetBusinessInterestsAsync(businessId));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetByBusiness Interests FAIL Boss {BusinessId}", businessId);
-                return Ok(new List<Dictionary<string, object>>());
-            }
-        }
+        public async Task<IActionResult> GetByBusiness(string businessId) => Ok(await _svc.GetBusinessInterestsAsync(businessId));
 
         [HttpPut("{interestId}/status")]
         public async Task<IActionResult> UpdateStatusPut(string interestId, [FromBody] Dictionary<string, string> body)
         {
-            try
-            {
-                if (body == null || !body.TryGetValue("status", out var status)) return BadRequest(new { message = "status required Boss" });
-                var ok = await _svc.UpdateInterestStatusAsync(interestId, status);
-                return ok ? Ok(new { message = $"Status {status} Boss" }) : NotFound(new { message = $"Interest {interestId} not found Boss" });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "UpdateStatusPut FAIL Boss {InterestId}", interestId);
-                return StatusCode(500, new { message = $"Update status failed Boss: {ex.Message} Boss" });
-            }
+            if (body == null || !body.TryGetValue("status", out var status)) return BadRequest(new { success = false, message = "Status is required" });
+            var ok = await _svc.UpdateInterestStatusAsync(interestId, status);
+            return ok ? Ok(new { success = true, message = $"Status updated to {status}" }) : NotFound(new { success = false, message = "Interest not found" });
         }
 
         [HttpPatch("{orderId}")]
         public async Task<IActionResult> UpdateStatusPatch(string orderId, [FromBody] Dictionary<string, string> body)
         {
-            try
-            {
-                var status = body != null && body.ContainsKey("status") ? body["status"] : "Successful";
-                var ok = await _svc.UpdateInterestStatusAsync(orderId, status);
-                return ok ? Ok(new { message = $"Boss Order {orderId} -> {status} Boss" }) : NotFound(new { message = $"Order {orderId} not found Boss" });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "UpdateStatusPatch FAIL Boss {OrderId}", orderId);
-                return StatusCode(500, new { message = $"Patch failed Boss: {ex.Message} Boss" });
-            }
+            var status = body != null && body.ContainsKey("status") ? body["status"] : "Successful";
+            var ok = await _svc.UpdateInterestStatusAsync(orderId, status);
+            return ok ? Ok(new { success = true, message = $"Order {orderId} updated to {status}" }) : NotFound(new { success = false, message = "Order not found" });
         }
     }
 
@@ -208,42 +124,18 @@ namespace IrhamTrade.Server.Controllers
     public class BuyersController : ControllerBase
     {
         private readonly DashboardService _svc;
-        private readonly ILogger<BuyersController> _logger;
-        public BuyersController(DashboardService svc, ILogger<BuyersController> logger)
-        {
-            _svc = svc;
-            _logger = logger;
-        }
-
+        public BuyersController(DashboardService svc, ILogger<BuyersController> logger) { _svc = svc; }
         [HttpGet("{buyerId}")]
         public async Task<IActionResult> GetProfile(string buyerId)
         {
-            try
-            {
-                var profile = await _svc.GetBuyerProfileAsync(buyerId);
-                return profile == null ? NotFound(new { message = $"Buyer {buyerId} not found Boss" }) : Ok(profile);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetProfile FAIL Boss {BuyerId}", buyerId);
-                return StatusCode(500, new { message = $"Get profile failed Boss: {ex.Message} Boss" });
-            }
+            var profile = await _svc.GetBuyerProfileAsync(buyerId);
+            return profile == null ? NotFound(new { success = false, message = "Buyer not found" }) : Ok(profile);
         }
-
         [HttpPut("{buyerId}")]
         public async Task<IActionResult> UpdateProfile(string buyerId, [FromBody] Dictionary<string, object> data)
         {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(buyerId) || data == null) return BadRequest(new { message = "buyerId and data required Boss" });
-                var ok = await _svc.UpdateBuyerProfileAsync(buyerId, data);
-                return ok ? Ok(new { message = "Profile updated Boss!" }) : BadRequest(new { message = "Update failed Boss" });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "UpdateProfile FAIL Boss {BuyerId}", buyerId);
-                return StatusCode(500, new { message = $"Update profile failed Boss: {ex.Message} Boss" });
-            }
+            var ok = await _svc.UpdateBuyerProfileAsync(buyerId, data);
+            return ok ? Ok(new { success = true, message = "Profile updated" }) : BadRequest(new { success = false, message = "Unable to update profile" });
         }
     }
 
@@ -252,42 +144,14 @@ namespace IrhamTrade.Server.Controllers
     public class BusinessesController : ControllerBase
     {
         private readonly DashboardService _svc;
-        private readonly ILogger<BusinessesController> _logger;
-        public BusinessesController(DashboardService svc, ILogger<BusinessesController> logger)
-        {
-            _svc = svc;
-            _logger = logger;
-        }
-
+        public BusinessesController(DashboardService svc, ILogger<BusinessesController> logger) { _svc = svc; }
         [HttpGet("{businessId}")]
         public async Task<IActionResult> GetOne(string businessId)
         {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(businessId)) return BadRequest(new { message = "businessId required Boss" });
-                var biz = await _svc.GetBusinessAsync(businessId);
-                return biz == null ? NotFound(new { message = $"Business {businessId} not found Boss" }) : Ok(biz);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetOne Business FAIL Boss {BusinessId}", businessId);
-                return StatusCode(500, new { message = $"Get business failed Boss: {ex.Message} Boss" });
-            }
+            var biz = await _svc.GetBusinessAsync(businessId);
+            return biz == null ? NotFound(new { success = false, message = "Business not found" }) : Ok(biz);
         }
-
         [HttpGet("all-with-devices")]
-        public async Task<IActionResult> GetAllWithDevices()
-        {
-            try
-            {
-                var list = await _svc.GetAllBusinessesWithDevicesAsync();
-                return Ok(list);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "GetAllWithDevices FAIL Boss");
-                return Ok(new List<Dictionary<string, object>>());
-            }
-        }
+        public async Task<IActionResult> GetAllWithDevices() => Ok(await _svc.GetAllBusinessesWithDevicesAsync());
     }
 }

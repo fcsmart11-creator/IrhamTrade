@@ -43,53 +43,51 @@ namespace IrhamTrade.Server.Services
             _logger = logger;
         }
 
-        // ===== FACEBOOK RETRY HELPER - 70 SEC TIMEOUT FOR RENDER COLD START =====
-        private async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, T fallback, string opName, int retries = 3)
+        private async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, T fallback, string opName, int retries = 2)
         {
             for (int attempt = 1; attempt <= retries; attempt++)
             {
                 try
                 {
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
                     var task = action();
                     var completed = await Task.WhenAny(task, Task.Delay(Timeout.Infinite, cts.Token));
                     if (completed == task) return await task;
-                    throw new TimeoutException($"BOSS {opName} timeout 70s Boss");
+                    throw new TimeoutException($"{opName} timeout");
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning($"BOSS {opName} attempt {attempt} failed Boss: {ex.Message} Boss");
+                    _logger.LogWarning(ex, "{Op} attempt {Attempt} failed", opName, attempt);
                     if (attempt == retries) return fallback;
-                    await Task.Delay(attempt == 1 ? 2000 : attempt == 2 ? 5000 : 10000);
+                    await Task.Delay(1500);
                 }
             }
             return fallback;
         }
 
-        // ================= REGISTER BUSINESS Boss - KEPT 100% + SEALED =================
         public async Task<AuthResult> RegisterBusinessAsync(string businessName, string phone, string location, string email, string password)
         {
-            if (string.IsNullOrWhiteSpace(businessName)) return Fail("Please enter business name Boss");
-            if (string.IsNullOrWhiteSpace(phone) || phone.Trim().Length < 9) return Fail("Valid phone required Boss, 9 digits Boss");
-            if (string.IsNullOrWhiteSpace(location)) return Fail("Please enter location Boss, e.g. Accra Ghana Boss");
-            if (string.IsNullOrWhiteSpace(email) || !email.Contains("@")) return Fail("Valid email required Boss");
-            if (string.IsNullOrWhiteSpace(password) || password.Length < 6) return Fail("Password 6 chars minimum Boss");
+            if (string.IsNullOrWhiteSpace(businessName)) return Fail("Please enter your business name");
+            if (string.IsNullOrWhiteSpace(phone) || phone.Trim().Length < 9) return Fail("Please enter a valid phone number");
+            if (string.IsNullOrWhiteSpace(location)) return Fail("Please enter your location");
+            if (string.IsNullOrWhiteSpace(email) || !email.Contains("@") || !email.Contains(".")) return Fail("Please enter a valid email address");
+            if (string.IsNullOrWhiteSpace(password) || password.Length < 6) return Fail("Password must be at least 6 characters");
 
             email = email.Trim().ToLower();
 
             try
             {
                 if (await _context.Users.AnyAsync(u => u.Email == email))
-                    return Fail("This email already exists Boss. Please login Boss");
+                    return Fail("An account with this email already exists. Please log in instead");
 
                 string firebaseUid = "";
                 try
                 {
-                    if (_firebaseService != null && _firebaseService.FirebaseAuth != null)
+                    if (_firebaseService.IsInitialized && _firebaseService.FirebaseAuth != null)
                     {
                         var fbUser = await ExecuteWithRetryAsync(async () =>
                         {
-                            return await _firebaseService.FirebaseAuth.CreateUserAsync(new UserRecordArgs
+                            return await _firebaseService.FirebaseAuth!.CreateUserAsync(new UserRecordArgs
                             {
                                 Email = email,
                                 Password = password,
@@ -97,33 +95,22 @@ namespace IrhamTrade.Server.Services
                                 EmailVerified = false
                             });
                         }, null!, "Firebase Create Business", 2);
-
-                        if (fbUser != null)
-                        {
-                            firebaseUid = fbUser.Uid;
-                            _logger.LogInformation($"Firebase user created Boss: {firebaseUid}");
-                        }
-                    }
-                    else
-                    {
-                        _logger.LogWarning("FirebaseAuth is null Boss, skipping Firebase creation Boss, using SQLite only Boss");
+                        if (fbUser != null) firebaseUid = fbUser.Uid;
                     }
                 }
                 catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
                 {
-                    return Fail("This email already exists Boss. Please login Boss");
+                    return Fail("An account with this email already exists. Please log in instead");
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning($"Firebase Auth create failed Boss, but continue with SQLite Boss: {ex.Message}");
+                    _logger.LogWarning(ex, "Firebase Auth create skipped, using SQLite only");
                 }
-
-                string hash = BCrypt.Net.BCrypt.HashPassword(password);
 
                 var user = new User
                 {
                     Email = email,
-                    PasswordHash = hash,
+                    PasswordHash = BCrypt.Net.BCrypt.HashPassword(password),
                     Role = "business",
                     BusinessName = businessName.Trim(),
                     FullName = businessName.Trim(),
@@ -135,13 +122,12 @@ namespace IrhamTrade.Server.Services
 
                 _context.Users.Add(user);
                 await _context.SaveChangesAsync();
-                _logger.LogInformation($"Business user saved to SQLite Boss: {user.Id} {email}");
 
-                try
+                _ = Task.Run(async () =>
                 {
-                    if (_firebaseService != null && _firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
+                    try
                     {
-                        await ExecuteWithRetryAsync(async () =>
+                        if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
                         {
                             var doc = _firebaseService.FirestoreDb.Collection("users").Document(user.Id.ToString());
                             await doc.SetAsync(new Dictionary<string, object>
@@ -155,91 +141,73 @@ namespace IrhamTrade.Server.Services
                                 { "location", location },
                                 { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
                             });
-                            return true;
-                        }, false, $"Firestore Save Business {user.Id}", 2);
-                        _logger.LogInformation($"Business user saved to Firestore Boss: {user.Id}");
+                        }
                     }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning($"Firestore save failed Boss, but SQL ok Boss: {ex.Message}");
-                }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Firestore background save failed"); }
+                });
 
                 var appUser = ToAppUser(user);
-                try
-                {
-                    appUser.Token = GenerateJwt(user);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, $"JWT generation failed Boss: {ex.Message}");
-                    return Fail($"Server config error Boss: JWT Key missing on Render Boss. Please set Jwt:Key in Render Env Boss. Real error: {ex.Message}");
-                }
+                appUser.Token = GenerateJwt(user);
 
-                return new AuthResult { Success = true, Message = "Welcome to IRHAM TRADE Boss! Business account ready Boss!", User = appUser };
+                return new AuthResult { Success = true, Message = "Business account created successfully. Welcome to IRHAM TRADE!", User = appUser };
             }
             catch (DbUpdateException ex)
             {
-                _logger.LogError(ex, $"DB Update error Boss RegisterBusiness: {ex.InnerException?.Message}");
-                return Fail($"Database error Boss: {ex.InnerException?.Message ?? ex.Message} Boss. Try again Boss.");
+                _logger.LogError(ex, "DB error RegisterBusiness");
+                return Fail("Unable to create account. This email may already be in use. Please try logging in instead");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"RegisterBusiness REAL ERROR Boss: {ex.Message} | Inner: {ex.InnerException?.Message} | Stack: {ex.StackTrace}");
-                var realMsg = ex.InnerException?.Message ?? ex.Message;
-                return Fail($"Could not create account Boss. Real reason Boss: {realMsg} Boss. Type: {ex.GetType().Name} Boss");
+                _logger.LogError(ex, "RegisterBusiness unexpected error");
+                return Fail("Unable to create account at the moment. Please try again in a few seconds");
             }
         }
 
-        // ================= REGISTER BUYER Boss - KEPT 100% + SEALED =================
         public async Task<AuthResult> RegisterBuyerAsync(string fullName, string phone, string location, string email, string password)
         {
-            if (string.IsNullOrWhiteSpace(fullName)) return Fail("Full name required Boss");
-            if (string.IsNullOrWhiteSpace(phone) || phone.Trim().Length < 9) return Fail("Valid phone required Boss");
-            if (string.IsNullOrWhiteSpace(location)) return Fail("Location required Boss");
-            if (string.IsNullOrWhiteSpace(email) || !email.Contains("@")) return Fail("Valid email required Boss");
-            if (string.IsNullOrWhiteSpace(password) || password.Length < 6) return Fail("Password 6 chars minimum Boss");
+            if (string.IsNullOrWhiteSpace(fullName)) return Fail("Please enter your full name");
+            if (string.IsNullOrWhiteSpace(phone) || phone.Trim().Length < 9) return Fail("Please enter a valid phone number");
+            if (string.IsNullOrWhiteSpace(location)) return Fail("Please enter your location");
+            if (string.IsNullOrWhiteSpace(email) || !email.Contains("@")) return Fail("Please enter a valid email address");
+            if (string.IsNullOrWhiteSpace(password) || password.Length < 6) return Fail("Password must be at least 6 characters");
 
             email = email.Trim().ToLower();
 
             try
             {
                 if (await _context.Users.AnyAsync(u => u.Email == email))
-                    return Fail("This email already exists Boss. Please login Boss");
+                    return Fail("An account with this email already exists. Please log in instead");
 
                 string firebaseUid = "";
                 try
                 {
-                    if (_firebaseService != null && _firebaseService.FirebaseAuth != null)
+                    if (_firebaseService.IsInitialized && _firebaseService.FirebaseAuth != null)
                     {
                         var fbUser = await ExecuteWithRetryAsync(async () =>
                         {
-                            return await _firebaseService.FirebaseAuth.CreateUserAsync(new UserRecordArgs
+                            return await _firebaseService.FirebaseAuth!.CreateUserAsync(new UserRecordArgs
                             {
                                 Email = email,
                                 Password = password,
                                 DisplayName = fullName
                             });
                         }, null!, "Firebase Create Buyer", 2);
-
                         if (fbUser != null) firebaseUid = fbUser.Uid;
                     }
                 }
                 catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
                 {
-                    return Fail("This email already exists Boss");
+                    return Fail("An account with this email already exists. Please log in instead");
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning($"Firebase create failed Boss: {ex.Message}");
+                    _logger.LogWarning(ex, "Firebase create skipped");
                 }
-
-                string hash = BCrypt.Net.BCrypt.HashPassword(password);
 
                 var user = new User
                 {
                     Email = email,
-                    PasswordHash = hash,
+                    PasswordHash = BCrypt.Net.BCrypt.HashPassword(password),
                     Role = "buyer",
                     FullName = fullName.Trim(),
                     BusinessName = "",
@@ -252,11 +220,11 @@ namespace IrhamTrade.Server.Services
                 _context.Users.Add(user);
                 await _context.SaveChangesAsync();
 
-                try
+                _ = Task.Run(async () =>
                 {
-                    if (_firebaseService != null && _firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
+                    try
                     {
-                        await ExecuteWithRetryAsync(async () =>
+                        if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
                         {
                             var doc = _firebaseService.FirestoreDb.Collection("users").Document(user.Id.ToString());
                             await doc.SetAsync(new Dictionary<string, object>
@@ -270,99 +238,63 @@ namespace IrhamTrade.Server.Services
                                 { "location", location },
                                 { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
                             });
-                            return true;
-                        }, false, $"Firestore Save Buyer {user.Id}", 2);
+                        }
                     }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning($"Firestore save failed Boss: {ex.Message}");
-                }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Firestore save failed"); }
+                });
 
                 var appUser = ToAppUser(user);
-                try
-                {
-                    appUser.Token = GenerateJwt(user);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, $"JWT generation failed Boss buyer: {ex.Message}");
-                    return Fail($"Server config error Boss: JWT missing Boss. Real: {ex.Message}");
-                }
+                appUser.Token = GenerateJwt(user);
 
-                return new AuthResult { Success = true, Message = "Welcome Boss! Buyer account created Boss!", User = appUser };
+                return new AuthResult { Success = true, Message = "Buyer account created successfully. Welcome to IRHAM TRADE!", User = appUser };
             }
-            catch (DbUpdateException ex)
+            catch (DbUpdateException)
             {
-                _logger.LogError(ex, $"DB error RegisterBuyer Boss: {ex.InnerException?.Message}");
-                return Fail($"Database error Boss: {ex.InnerException?.Message ?? ex.Message}");
+                _logger.LogError("DB error RegisterBuyer");
+                return Fail("Unable to create account. This email may already be in use");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"RegisterBuyer REAL ERROR Boss: {ex.Message} | Inner: {ex.InnerException?.Message}");
-                var realMsg = ex.InnerException?.Message ?? ex.Message;
-                return Fail($"Could not create buyer account Boss. Real reason Boss: {realMsg} Boss. Type: {ex.GetType().Name}");
+                _logger.LogError(ex, "RegisterBuyer unexpected");
+                return Fail("Unable to create account at the moment. Please try again shortly");
             }
         }
 
-        // ================= LOGIN Boss - REAL ROLE Boss - KEPT 100% + SEALED =================
         public async Task<AuthResult> LoginAsync(string email, string password)
         {
-            if (string.IsNullOrWhiteSpace(email) || !email.Contains("@")) return Fail("Valid email required Boss");
-            if (string.IsNullOrWhiteSpace(password)) return Fail("Password required Boss");
+            if (string.IsNullOrWhiteSpace(email) || !email.Contains("@")) return Fail("Please enter a valid email address");
+            if (string.IsNullOrWhiteSpace(password)) return Fail("Please enter your password");
 
             email = email.Trim().ToLower();
 
             try
             {
                 var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
-                if (user == null)
-                    return Fail("Account not found Boss. Create account first Boss");
+                if (user == null) return Fail("No account found with this email. Please create an account first");
+                if (!BCrypt.Net.BCrypt.Verify(password, user.PasswordHash)) return Fail("Incorrect email or password. Please try again");
 
-                if (!BCrypt.Net.BCrypt.Verify(password, user.PasswordHash))
-                    return Fail("Wrong password Boss. Try again Boss");
-
-                try
-                {
-                    user.LastLoginAt = DateTime.UtcNow;
-                    await _context.SaveChangesAsync();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning($"LastLogin update failed Boss but login continues Boss: {ex.Message}");
-                }
+                user.LastLoginAt = DateTime.UtcNow;
+                try { await _context.SaveChangesAsync(); } catch (Exception ex) { _logger.LogWarning(ex, "LastLogin update failed"); }
 
                 var appUser = ToAppUser(user);
-                try
-                {
-                    appUser.Token = GenerateJwt(user);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, $"JWT login failed Boss: {ex.Message}");
-                    return Fail($"Server JWT config error Boss: {ex.Message}");
-                }
+                appUser.Token = GenerateJwt(user);
 
-                return new AuthResult { Success = true, Message = "Login success Boss! Opening your account Boss!", User = appUser };
+                return new AuthResult { Success = true, Message = "Login successful", User = appUser };
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"Login REAL ERROR Boss: {ex.Message} | Inner: {ex.InnerException?.Message}");
-                var realMsg = ex.InnerException?.Message ?? ex.Message;
-                return Fail($"Login failed Boss. Real reason Boss: {realMsg} Boss");
+                _logger.LogError(ex, "Login error");
+                return Fail("Unable to log in at the moment. Please check your connection and try again");
             }
         }
 
-        // ================= HELPERS Boss - KEPT 100% =================
         private string GenerateJwt(User user)
         {
-            var key = _config["Jwt:Key"] ?? throw new Exception("Jwt:Key is missing in appsettings / Render Env Boss!");
-            if (key.Length < 32) throw new Exception($"Jwt:Key too short Boss: {key.Length} chars, need 32+ Boss");
-
-            var issuer = _config["Jwt:Issuer"] ?? "IrhamTrade";
-            var audience = _config["Jwt:Audience"] ?? "IrhamTrade";
-            var expireMinutesStr = _config["Jwt:ExpireMinutes"] ?? "1440";
-            if (!int.TryParse(expireMinutesStr, out var expireMinutes)) expireMinutes = 1440;
+            var key = _config["Jwt:Key"] ?? Environment.GetEnvironmentVariable("JWT_KEY") ?? throw new InvalidOperationException("JWT Key not configured");
+            if (key.Length < 32) throw new InvalidOperationException("JWT Key must be at least 32 characters");
+            var issuer = _config["Jwt:Issuer"] ?? "IrhamTrade.Server";
+            var audience = _config["Jwt:Audience"] ?? "IrhamTrade.App";
+            var expireMinutes = int.TryParse(_config["Jwt:ExpireMinutes"], out var m) ? m : 1440;
 
             var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
             var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
@@ -377,14 +309,7 @@ namespace IrhamTrade.Server.Services
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
             };
 
-            var token = new JwtSecurityToken(
-                issuer: issuer,
-                audience: audience,
-                claims: claims,
-                expires: DateTime.UtcNow.AddMinutes(expireMinutes),
-                signingCredentials: credentials
-            );
-
+            var token = new JwtSecurityToken(issuer, audience, claims, expires: DateTime.UtcNow.AddMinutes(expireMinutes), signingCredentials: credentials);
             return new JwtSecurityTokenHandler().WriteToken(token);
         }
 

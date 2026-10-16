@@ -5,26 +5,33 @@ namespace IrhamTrade.Server.Models
     public class User
     {
         [Key]
-        public int Id { get; set; } // Auto increment Boss for SQLite Boss
+        public int Id { get; set; }
 
         [Required]
+        [MaxLength(256)]
         public string Email { get; set; } = "";
 
         [Required]
-        public string PasswordHash { get; set; } = ""; // BCrypt Boss - secure Boss
+        public string PasswordHash { get; set; } = "";
 
         [Required]
-        public string Role { get; set; } = ""; // "business" or "buyer" Boss
+        [MaxLength(20)]
+        public string Role { get; set; } = "";
 
-        public string? BusinessName { get; set; } // For business Boss
+        [MaxLength(200)]
+        public string? BusinessName { get; set; }
 
-        public string? FullName { get; set; } // For buyer Boss
+        [MaxLength(200)]
+        public string? FullName { get; set; }
 
+        [MaxLength(20)]
         public string? Phone { get; set; }
 
+        [MaxLength(100)]
         public string? Location { get; set; }
 
-        public string? FirebaseUid { get; set; } // Firebase ID Boss for Android APK Boss
+        [MaxLength(128)]
+        public string? FirebaseUid { get; set; }
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 

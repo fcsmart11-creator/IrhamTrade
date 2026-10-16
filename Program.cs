@@ -1,5 +1,3 @@
-using FirebaseAdmin;
-using Google.Apis.Auth.OAuth2;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
@@ -10,25 +8,19 @@ using IrhamTrade.Server.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// BOSS FIX 1 - Use 0.0.0.0 not + for Render health check Boss
 var port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
 try
 {
     var keysPath = "/tmp/keys";
-    if (!Directory.Exists(keysPath))
-    {
-        Directory.CreateDirectory(keysPath);
-        Console.WriteLine($"BOSS - Created {keysPath} Boss for DataProtection Boss");
-    }
+    Directory.CreateDirectory(keysPath);
     builder.Services.AddDataProtection()
-      .PersistKeysToFileSystem(new DirectoryInfo(keysPath))
-      .SetApplicationName("IrhamTrade");
+    .PersistKeysToFileSystem(new DirectoryInfo(keysPath))
+    .SetApplicationName("IrhamTrade");
 }
-catch (Exception ex)
+catch
 {
-    Console.WriteLine($"BOSS DataProtection setup warning Boss: {ex.Message} Boss - Continuing Boss");
     builder.Services.AddDataProtection().SetApplicationName("IrhamTrade");
 }
 
@@ -42,12 +34,8 @@ if (!string.IsNullOrEmpty(postgresUrl))
         var uri = new Uri(postgresUrl);
         var userInfo = uri.UserInfo.Split(':');
         connStr = $"Host={uri.Host};Port={uri.Port};Database={uri.AbsolutePath.Trim('/')};Username={userInfo[0]};Password={userInfo[1]};SSL Mode=Require;Trust Server Certificate=true;";
-        Console.WriteLine("BOSS - Converted DATABASE_URL to Postgres conn Boss");
     }
-    catch (Exception ex)
-    {
-        Console.WriteLine($" DATABASE_URL parse failed Boss: {ex.Message} Boss - Using fallback Boss");
-    }
+    catch { }
 }
 
 if (connStr.StartsWith("postgres", StringComparison.OrdinalIgnoreCase) || connStr.Contains("Host="))
@@ -56,17 +44,13 @@ if (connStr.StartsWith("postgres", StringComparison.OrdinalIgnoreCase) || connSt
     {
         options.UseNpgsql(connStr, npgsqlOptions =>
         {
-            npgsqlOptions.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorCodesToAdd: null);
+            npgsqlOptions.EnableRetryOnFailure(5, TimeSpan.FromSeconds(10), null);
         });
-        options.EnableDetailedErrors();
     });
-    Console.WriteLine($"BOSS - Using POSTGRES in Production Boss");
 }
 else
 {
-    builder.Services.AddDbContext<AppDbContext>(options =>
-        options.UseSqlite(connStr));
-    Console.WriteLine($"BOSS - Using SQLITE Boss - Path: {connStr} Boss");
+    builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlite(connStr));
 }
 
 builder.Services.AddSingleton<FirebaseService>();
@@ -76,15 +60,13 @@ builder.Services.AddScoped<FirestoreService>();
 builder.Services.AddHttpClient();
 
 var jwtKey = builder.Configuration["Jwt:Key"]
-   ?? builder.Configuration["Jwt__Key"]
-   ?? Environment.GetEnvironmentVariable("Jwt__Key")
-   ?? Environment.GetEnvironmentVariable("JWT_KEY")
-   ?? "IrhamTrade_Super_Secret_Key_2025_For_JWT_32_Chars_Min_Boss_123456";
+ ?? builder.Configuration["Jwt__Key"]
+ ?? Environment.GetEnvironmentVariable("Jwt__Key")
+ ?? Environment.GetEnvironmentVariable("JWT_KEY")
+ ?? "IrhamTrade-Dev-Key-Only-Not-For-Prod-32-Chars-Min-2026!";
 
-var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "IrhamTrade";
-var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTradeUsers";
-
-Console.WriteLine($"BOSS JWT Key exists: {!string.IsNullOrEmpty(jwtKey)} Length: {jwtKey.Length} Boss");
+var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "IrhamTrade.Server";
+var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTrade.App";
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 .AddJwtBearer(options =>
@@ -107,8 +89,7 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowAll", policy =>
-        policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
+    options.AddPolicy("AllowAll", p => p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
 });
 builder.Services.AddHealthChecks();
 
@@ -120,31 +101,25 @@ app.UseExceptionHandler(errorApp =>
     {
         context.Response.StatusCode = 500;
         context.Response.ContentType = "application/json";
-        await context.Response.WriteAsync("{\"error\":\"BOSS Server error but still alive Boss - Try again Boss\",\"success\":false}");
-        Console.WriteLine($"BOSS Global exception caught Boss - Server still alive Boss: {context.Request.Path} Boss");
+        await context.Response.WriteAsJsonAsync(new { success = false, message = "Server is busy at the moment. Please try again in a few seconds" });
     });
 });
 
-try
-{
-    var firebaseService = app.Services.GetRequiredService<FirebaseService>();
-    if (firebaseService.IsInitialized)
-    {
-        Console.WriteLine(" FIREBASE STRONG LINK CONFIRMED Boss! READY FOR CUSTOMERS Boss! ");
-    }
-    else
-    {
-        Console.WriteLine(" FIREBASE FAILED Boss - Check FIREBASE_KEY_JSON ENV Boss - But server still running Boss");
-    }
-}
-catch (Exception ex)
-{
-    Console.WriteLine($" BOSS FIREBASE EXCEPTION Boss: {ex.Message} Boss - Server still running Boss");
-}
-
-// BOSS FIX 2 - Health check MUST be mapped BEFORE heavy DB init Boss - Render checks / immediately Boss
-app.MapGet("/", () => Results.Ok("IrhamTrade Server LIVE Boss! Professional Postgres Ready Boss! Firebase Sealed Boss! API: /api/dashboard /api/auth /swagger"));
+app.MapGet("/", () => Results.Ok(new { status = "IRHAM TRADE Server is LIVE on.NET 10", project = "irhamtrade-31ca6", framework = ".NET 10", time = DateTime.UtcNow }));
 app.MapHealthChecks("/health");
+app.MapGet("/health/detailed", (AppDbContext db, FirebaseService fb) =>
+{
+    var dbOk = false;
+    try { dbOk = db.Database.CanConnect(); } catch { dbOk = false; }
+    return Results.Ok(new
+    {
+        status = "ok",
+        framework = ".NET 10",
+        database = dbOk ? "connected" : "connecting",
+        firebase = fb.IsInitialized ? "connected" : "connecting",
+        time = DateTime.UtcNow
+    });
+});
 
 app.UseSwagger();
 app.UseSwaggerUI();
@@ -153,65 +128,53 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
-// BOSS FIX 3 - DB init AFTER MapGet so health check answers fast Boss - No blocking Thread.Sleep Boss
 using (var scope = app.Services.CreateScope())
 {
-    int maxRetries = 3;
-    for (int attempt = 1; attempt <= maxRetries; attempt++)
+    for (int attempt = 1; attempt <= 3; attempt++)
     {
         try
         {
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            Console.WriteLine($"BOSS - Checking database structure Boss... Attempt {attempt} Boss");
+            var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
 
             var hasMigrations = false;
-            try { hasMigrations = db.Database.GetMigrations().Any(); }
-            catch { hasMigrations = false; Console.WriteLine("BOSS - GetMigrations failed, using EnsureCreated Boss"); }
+            try { hasMigrations = db.Database.GetMigrations().Any(); } catch { hasMigrations = false; }
 
             if (!hasMigrations)
             {
-                Console.WriteLine("BOSS - No migrations configured Boss, using EnsureCreated Boss");
                 var created = db.Database.EnsureCreated();
-                Console.WriteLine($"BOSS - Database ready Boss! Tables created via EnsureCreated: {created} Boss!");
+                logger.LogInformation("Database ensured created: {Created} on.NET 10", created);
             }
             else
             {
-                Console.WriteLine("BOSS - Applying migrations Boss...");
                 db.Database.Migrate();
-                Console.WriteLine("BOSS - Database migrated Boss! Tables created Boss!");
-            }
-
-            if (db.Database.CanConnect())
-            {
-                Console.WriteLine("BOSS - Database connected Boss! READY Boss!");
+                logger.LogInformation("Database migrated successfully on.NET 10");
             }
             break;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"BOSS - Migration attempt {attempt} error Boss: {ex.Message} Boss");
-            if (attempt == maxRetries)
+            var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+            logger.LogWarning(ex, "Database init attempt {Attempt} failed on.NET 10", attempt);
+            if (attempt == 3)
             {
                 try
                 {
                     var db2 = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                    var created = db2.Database.EnsureCreated();
-                    Console.WriteLine($"BOSS - Database created via fallback EnsureCreated: {created} Boss!");
+                    db2.Database.EnsureCreated();
                 }
                 catch (Exception ex2)
                 {
-                    Console.WriteLine($"BOSS - Fallback also failed Boss: {ex2.Message} Boss - Server will still run Boss");
+                    logger.LogError(ex2, "Database fallback failed - server will continue on.NET 10");
                 }
             }
             else
             {
-                // BOSS FIX - Use Task.Delay non-blocking? For startup keep Thread.Sleep but short Boss
                 Thread.Sleep(1000);
             }
         }
     }
 }
 
-Console.WriteLine($"Boss - Server running on port {port} Boss! SEALED Boss!");
-
+app.Logger.LogInformation("Server running on port {Port} with.NET 10", port);
 app.Run();

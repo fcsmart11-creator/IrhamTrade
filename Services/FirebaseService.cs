@@ -20,27 +20,35 @@ public class FirebaseService
     {
         lock (_lock)
         {
+            
             if (_alreadyTriedInit && FirebaseApp.DefaultInstance != null)
             {
                 try
                 {
                     ProjectId = Environment.GetEnvironmentVariable("Firebase__ProjectId")
-                        ?? configuration["Firebase:ProjectId"] ?? "irhamtrade-31ca6";
+                        ?? Environment.GetEnvironmentVariable("FIREBASE_PROJECT_ID")
+                        ?? configuration["Firebase:ProjectId"]
+                        ?? configuration["Firebase__ProjectId"]
+                        ?? "irhamtrade-31ca6";
+
                     FirebaseAuth = FirebaseAuth.DefaultInstance;
                     var credential = GetCredential(configuration, logger);
                     var firestoreClient = new FirestoreClientBuilder { Credential = credential }.Build();
                     FirestoreDb = FirestoreDb.Create(ProjectId, firestoreClient);
                     IsInitialized = true;
-                    logger.LogInformation("Firebase reused existing app. Project: {ProjectId}", ProjectId);
+                    logger.LogInformation(" Firebase reused existing app. Project: {ProjectId}", ProjectId);
                     return;
                 }
                 catch (Exception ex)
                 {
                     logger.LogWarning(ex, "Reusing existing FirebaseApp failed, will re-init");
+                    // Force re-init below
+                    _alreadyTriedInit = false;
+                    try { FirebaseApp.DefaultInstance?.Delete(); } catch { }
                 }
             }
 
-            const int maxRetries = 3;
+            const int maxRetries = 4;
             Exception? lastEx = null;
 
             for (int attempt = 1; attempt <= maxRetries; attempt++)
@@ -49,6 +57,7 @@ public class FirebaseService
                 {
                     var jsonFromEnv = Environment.GetEnvironmentVariable("FIREBASE_KEY_JSON");
                     ProjectId = Environment.GetEnvironmentVariable("Firebase__ProjectId")
+                                ?? Environment.GetEnvironmentVariable("FIREBASE_PROJECT_ID")
                                 ?? configuration["Firebase:ProjectId"]
                                 ?? configuration["Firebase__ProjectId"]
                                 ?? "irhamtrade-31ca6";
@@ -64,28 +73,33 @@ public class FirebaseService
                             ProjectId = ProjectId
                         });
                     }
+                    else
+                    {
+                        logger.LogInformation("FirebaseApp already exists, using it Attempt {Attempt}", attempt);
+                    }
 
                     FirebaseAuth = FirebaseAuth.DefaultInstance;
 
                     var firestoreClient = new FirestoreClientBuilder
                     {
-                        Credential = credential,
-                        // Increase timeout like Facebook backend
+                        Credential = credential
                     }.Build();
 
                     FirestoreDb = FirestoreDb.Create(ProjectId, firestoreClient);
 
-                    // Test Firestore connection - like Facebook health check
+                    // Health check  test read
                     try
                     {
                         var testTask = FirestoreDb.Collection("_health").Document("test").GetSnapshotAsync();
-                        Task.WhenAny(testTask, Task.Delay(5000)).Wait();
+                        var completed = Task.WhenAny(testTask, Task.Delay(5000)).Result;
+                        if (completed == testTask)
+                            logger.LogInformation("Firestore health check OK");
                     }
-                    catch { /* Health check non-critical */ }
+                    catch (Exception hex) { logger.LogWarning(hex, "Firestore health check non-critical"); }
 
                     IsInitialized = true;
                     _alreadyTriedInit = true;
-                    logger.LogInformation("✅ Firebase initialized SUCCESS. Project: {ProjectId}, Attempt: {Attempt}", ProjectId, attempt);
+                    logger.LogInformation(" Firebase initialized SUCCESS. Project: {ProjectId}, Attempt: {Attempt}", ProjectId, attempt);
                     return;
                 }
                 catch (Exception ex)
@@ -94,13 +108,14 @@ public class FirebaseService
                     logger.LogWarning(ex, "Firebase init attempt {Attempt} failed", attempt);
                     if (attempt < maxRetries)
                     {
-                        int delay = attempt == 1 ? 2000 : attempt == 2 ? 5000 : 10000;
+                        int delay = attempt == 1 ? 2000 : attempt == 2 ? 5000 : attempt == 3 ? 10000 : 15000;
                         Thread.Sleep(delay);
+                        try { FirebaseApp.DefaultInstance?.Delete(); } catch { }
                     }
                 }
             }
 
-            logger.LogError(lastEx, "❌ Firebase initialization failed after {MaxRetries} attempts. App will run with SQLite only fallback.", maxRetries);
+            logger.LogError(lastEx, " Firebase initialization failed after {MaxRetries} attempts. App will run with SQLite + Firebase REST fallback.", maxRetries);
             IsInitialized = false;
             _alreadyTriedInit = true;
         }
@@ -112,9 +127,15 @@ public class FirebaseService
 
         if (!string.IsNullOrWhiteSpace(jsonFromEnv))
         {
-            logger.LogInformation("Initializing Firebase from ENV JSON, Attempt: {Attempt}", attempt);
-            // Handle escaped newlines from Render env
+            logger.LogInformation("Initializing Firebase from ENV JSON, Attempt: {Attempt} Length: {Len}", attempt, jsonFromEnv.Length);
+            // Handle escaped newlines and quotes from Render env
             if (jsonFromEnv.Contains("\\n")) jsonFromEnv = jsonFromEnv.Replace("\\n", "\n");
+            // Fix if JSON was double-encoded
+            jsonFromEnv = jsonFromEnv.Trim();
+            if (jsonFromEnv.StartsWith("\"") && jsonFromEnv.EndsWith("\""))
+            {
+                try { jsonFromEnv = System.Text.Json.JsonSerializer.Deserialize<string>(jsonFromEnv) ?? jsonFromEnv; } catch { }
+            }
             return GoogleCredential.FromJson(jsonFromEnv);
         }
         else
@@ -126,12 +147,15 @@ public class FirebaseService
                 Path.Combine(Directory.GetCurrentDirectory(), "Data", "firebase-key.json"),
                 Path.Combine(Directory.GetCurrentDirectory(), "IrhamTrade.Server", "Data", "firebase-key.json"),
                 "Data/firebase-key.json",
-                "/app/Data/firebase-key.json" // Docker path on Render
+                "/app/Data/firebase-key.json",
+                "/opt/render/project/src/IrhamTrade.Server/Data/firebase-key.json",
+                "/opt/render/project/src/Data/firebase-key.json"
             };
             var path = possiblePaths.FirstOrDefault(File.Exists);
             if (path == null)
                 throw new FileNotFoundException($"Firebase key file not found. Checked: {string.Join(", ", possiblePaths)}");
 
+            logger.LogInformation("Using Firebase key file: {Path}", path);
             return GoogleCredential.FromFile(path);
         }
     }

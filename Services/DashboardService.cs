@@ -14,23 +14,23 @@ namespace IrhamTrade.Server.Services
             _logger.LogInformation("DashboardService initialized Project: {ProjectId}", _db.ProjectId);
         }
 
-        private async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, T fallback, string opName, int retries = 3)
+        private async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, T fallback, string opName, int retries = 2)
         {
             for (int attempt = 1; attempt <= retries; attempt++)
             {
                 try
                 {
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
                     var task = action();
                     var completed = await Task.WhenAny(task, Task.Delay(Timeout.Infinite, cts.Token));
                     if (completed == task) return await task;
-                    throw new TimeoutException($"{opName} timeout 70s");
+                    throw new TimeoutException($"{opName} timeout 25s");
                 }
                 catch (Exception ex)
                 {
                     _logger.LogWarning("{Op} attempt {Attempt} failed: {Msg}", opName, attempt, ex.Message);
                     if (attempt == retries) return fallback;
-                    await Task.Delay(attempt == 1 ? 2000 : attempt == 2 ? 5000 : 10000);
+                    await Task.Delay(attempt == 1 ? 1500 : 3000);
                 }
             }
             return fallback;
@@ -45,22 +45,69 @@ namespace IrhamTrade.Server.Services
             return "";
         }
 
-        // ================= DEVICES - LIVE FEED FOR ALL BUYERS =================
+        // BOSS FIX - CS0103 FIXED - No TSS, no nullable Timestamp? pattern
+        private static object ConvertValue(object value)
+        {
+            if (value is Timestamp timestamp)
+            {
+                return timestamp.ToDateTime();
+            }
+            return value;
+        }
+
+        private static Dictionary<string, object> SanitizeDoc(Dictionary<string, object> data, string docId)
+        {
+            var clean = new Dictionary<string, object>();
+            foreach (var kv in data)
+            {
+                clean[kv.Key] = ConvertValue(kv.Value);
+            }
+            clean["id"] = docId;
+            clean["deviceId"] = docId;
+            if (!clean.ContainsKey("productName") && clean.TryGetValue("name", out var n)) clean["productName"] = n;
+            if (!clean.ContainsKey("name") && clean.TryGetValue("productName", out var pn)) clean["name"] = pn;
+            return clean;
+        }
+
+        private static Dictionary<string, object> SanitizeInterest(Dictionary<string, object> data, string docId)
+        {
+            var clean = new Dictionary<string, object>();
+            foreach (var kv in data)
+            {
+                clean[kv.Key] = ConvertValue(kv.Value);
+            }
+            clean["id"] = docId;
+            clean["interestId"] = docId;
+            clean["orderId"] = docId;
+            return clean;
+        }
+
         public async Task<List<Dictionary<string, object>>> GetAllDevicesAsync()
         {
             return await ExecuteWithRetryAsync(async () =>
             {
                 try
                 {
-                    var snap = await _db.Collection("devices").WhereEqualTo("status", "active").OrderByDescending("createdAt").Limit(500).GetSnapshotAsync();
+                    var snap = await _db.Collection("devices").WhereEqualTo("status", "active").Limit(200).GetSnapshotAsync();
                     if (snap.Count == 0)
-                        snap = await _db.Collection("devices").OrderByDescending("createdAt").Limit(500).GetSnapshotAsync();
-                    return snap.Documents.Select(doc => { var d = doc.ToDictionary(); d["id"] = doc.Id; d["deviceId"] = doc.Id; return d; }).ToList();
+                    {
+                        snap = await _db.Collection("devices").Limit(200).GetSnapshotAsync();
+                    }
+                    var list = snap.Documents.Select(doc => SanitizeDoc(doc.ToDictionary(), doc.Id)).ToList();
+                    // Sort in memory by createdAt DateTime
+                    list = list.OrderByDescending(d =>
+                    {
+                        if (d.TryGetValue("createdAt", out var v) && v is DateTime dt) return dt;
+                        return DateTime.MinValue;
+                    }).ToList();
+                    _logger.LogInformation("GetAllDevices LIVE count {Count}", list.Count);
+                    return list;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    var snap = await _db.Collection("devices").Limit(500).GetSnapshotAsync();
-                    return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["deviceId"] = d.Id; return dict; }).ToList();
+                    _logger.LogWarning(ex, "GetAllDevices with status filter failed, trying simple list");
+                    var snap = await _db.Collection("devices").Limit(200).GetSnapshotAsync();
+                    return snap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)).ToList();
                 }
             }, new List<Dictionary<string, object>>(), "GetAllDevices");
         }
@@ -72,13 +119,23 @@ namespace IrhamTrade.Server.Services
             {
                 try
                 {
-                    var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).OrderByDescending("createdAt").GetSnapshotAsync();
-                    return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["deviceId"] = d.Id; return dict; }).ToList();
-                }
-                catch
-                {
                     var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
-                    return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; return dict; }).ToList();
+                    if (snap.Count == 0)
+                        snap = await _db.Collection("devices").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
+
+                    var list = snap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)).ToList();
+                    list = list.OrderByDescending(d =>
+                    {
+                        if (d.TryGetValue("createdAt", out var v) && v is DateTime dt) return dt;
+                        return DateTime.MinValue;
+                    }).ToList();
+                    return list;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "GetDevicesByBusiness failed for {BusinessId}", businessId);
+                    var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                    return snap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)).ToList();
                 }
             }, new List<Dictionary<string, object>>(), $"GetDevicesByBusiness {businessId}");
         }
@@ -116,10 +173,12 @@ namespace IrhamTrade.Server.Services
                 var docId = GetString(data, "id");
                 if (string.IsNullOrWhiteSpace(docId)) docId = Guid.NewGuid().ToString("N");
 
+                var now = Timestamp.GetCurrentTimestamp();
                 var firestoreData = new Dictionary<string, object>
                 {
                     ["id"] = docId,
                     ["deviceId"] = docId,
+                    ["productId"] = docId,
                     ["name"] = name,
                     ["productName"] = name,
                     ["model"] = name,
@@ -141,13 +200,11 @@ namespace IrhamTrade.Server.Services
                     ["hasImage"] = !string.IsNullOrWhiteSpace(imageBase64),
                     ["location"] = location,
                     ["stock"] = 100,
-                    ["createdAt"] = Timestamp.GetCurrentTimestamp(),
-                    ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                    ["createdAt"] = now,
+                    ["updatedAt"] = now
                 };
 
                 await _db.Collection("devices").Document(docId).SetAsync(firestoreData);
-
-                // Also save to products collection for compatibility - so buyer sees LIVE in both
                 try { await _db.Collection("products").Document(docId).SetAsync(firestoreData, SetOptions.MergeAll); } catch { }
 
                 _logger.LogInformation("Device created LIVE {DeviceId} {Name} Business {BusinessId}", docId, name, businessId);
@@ -197,17 +254,39 @@ namespace IrhamTrade.Server.Services
             }, false, $"DeleteDevice {deviceId}");
         }
 
-        // ================= INTERESTS =================
         public async Task<string> CreateInterestAsync(Dictionary<string, object> data)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
             return await ExecuteWithRetryAsync(async () =>
             {
+                var businessId = GetString(data, "businessId");
+                if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "ownerId");
+                var productId = GetString(data, "productId");
+                if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "deviceId");
+                var buyerId = GetString(data, "buyerId");
+                if (string.IsNullOrWhiteSpace(buyerId)) buyerId = GetString(data, "userId");
+                var buyerName = GetString(data, "buyerName");
+                if (string.IsNullOrWhiteSpace(buyerName)) buyerName = GetString(data, "fullName");
+                if (string.IsNullOrWhiteSpace(buyerName)) buyerName = GetString(data, "name");
+
+                if (string.IsNullOrWhiteSpace(businessId)) throw new ArgumentException("businessId is required for Order");
+                if (string.IsNullOrWhiteSpace(productId)) throw new ArgumentException("productId is required");
+
+                data["businessId"] = businessId;
+                data["ownerId"] = businessId;
+                data["productId"] = productId;
+                data["deviceId"] = productId;
+                data["buyerId"] = buyerId;
+                data["buyerName"] = buyerName;
                 data["createdAt"] = Timestamp.GetCurrentTimestamp();
                 data["updatedAt"] = Timestamp.GetCurrentTimestamp();
                 if (!data.ContainsKey("status")) data["status"] = "Pending";
                 if (!data.ContainsKey("date")) data["date"] = Timestamp.GetCurrentTimestamp();
+
                 var doc = await _db.Collection("interests").AddAsync(data);
+                try { await _db.Collection("orders").Document(doc.Id).SetAsync(data); } catch { }
+
+                _logger.LogInformation("Interest created LIVE {InterestId} Product {ProductId} Business {BusinessId} Buyer {BuyerName}", doc.Id, productId, businessId, buyerName);
                 return doc.Id;
             }, null!, "CreateInterest");
         }
@@ -217,16 +296,14 @@ namespace IrhamTrade.Server.Services
             if (string.IsNullOrWhiteSpace(buyerId)) return new();
             return await ExecuteWithRetryAsync(async () =>
             {
-                try
+                var snap = await _db.Collection("interests").WhereEqualTo("buyerId", buyerId).GetSnapshotAsync();
+                var list = snap.Documents.Select(d => SanitizeInterest(d.ToDictionary(), d.Id)).ToList();
+                list = list.OrderByDescending(d =>
                 {
-                    var snap = await _db.Collection("interests").WhereEqualTo("buyerId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
-                    return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["interestId"] = d.Id; return dict; }).ToList();
-                }
-                catch
-                {
-                    var snap = await _db.Collection("interests").WhereEqualTo("buyerId", buyerId).GetSnapshotAsync();
-                    return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; return dict; }).ToList();
-                }
+                    if (d.TryGetValue("createdAt", out var v) && v is DateTime dt) return dt;
+                    return DateTime.MinValue;
+                }).ToList();
+                return list;
             }, new List<Dictionary<string, object>>(), $"GetBuyerInterests {buyerId}");
         }
 
@@ -235,16 +312,19 @@ namespace IrhamTrade.Server.Services
             if (string.IsNullOrWhiteSpace(businessId)) return new();
             return await ExecuteWithRetryAsync(async () =>
             {
-                try
+                var snap = await _db.Collection("interests").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                if (snap.Count == 0)
+                    snap = await _db.Collection("interests").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
+                if (snap.Count == 0)
+                    snap = await _db.Collection("orders").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+
+                var list = snap.Documents.Select(d => SanitizeInterest(d.ToDictionary(), d.Id)).ToList();
+                list = list.OrderByDescending(d =>
                 {
-                    var snap = await _db.Collection("interests").WhereEqualTo("businessId", businessId).OrderByDescending("createdAt").GetSnapshotAsync();
-                    return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; dict["interestId"] = d.Id; return dict; }).ToList();
-                }
-                catch
-                {
-                    var snap = await _db.Collection("interests").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
-                    return snap.Documents.Select(d => { var dict = d.ToDictionary(); dict["id"] = d.Id; return dict; }).ToList();
-                }
+                    if (d.TryGetValue("createdAt", out var v) && v is DateTime dt) return dt;
+                    return DateTime.MinValue;
+                }).ToList();
+                return list;
             }, new List<Dictionary<string, object>>(), $"GetBusinessInterests {businessId}");
         }
 
@@ -258,6 +338,7 @@ namespace IrhamTrade.Server.Services
                 if (snap.Exists)
                 {
                     await docRef.SetAsync(new Dictionary<string, object> { ["status"] = status, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll);
+                    try { await _db.Collection("orders").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = status, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll); } catch { }
                     return true;
                 }
                 var q = await _db.Collection("interests").WhereEqualTo("orderId", interestId).Limit(1).GetSnapshotAsync();
@@ -266,11 +347,16 @@ namespace IrhamTrade.Server.Services
                     await q.Documents[0].Reference.SetAsync(new Dictionary<string, object> { ["status"] = status, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll);
                     return true;
                 }
+                var oq = await _db.Collection("orders").Document(interestId).GetSnapshotAsync();
+                if (oq.Exists)
+                {
+                    await oq.Reference.SetAsync(new Dictionary<string, object> { ["status"] = status, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll);
+                    return true;
+                }
                 return false;
             }, false, $"UpdateInterest {interestId}");
         }
 
-        // ================= PROFILES =================
         public async Task<Dictionary<string, object>?> GetBuyerProfileAsync(string buyerId)
         {
             if (string.IsNullOrWhiteSpace(buyerId)) return null;
@@ -279,7 +365,7 @@ namespace IrhamTrade.Server.Services
                 var snap = await _db.Collection("users").Document(buyerId).GetSnapshotAsync();
                 if (!snap.Exists) snap = await _db.Collection("buyers").Document(buyerId).GetSnapshotAsync();
                 if (!snap.Exists) return null;
-                var dict = snap.ToDictionary(); dict["id"] = snap.Id; return dict;
+                return SanitizeDoc(snap.ToDictionary(), snap.Id);
             }, null, $"GetBuyerProfile {buyerId}");
         }
 
@@ -308,10 +394,7 @@ namespace IrhamTrade.Server.Services
                     if (q.Count > 0) snap = q.Documents[0];
                 }
                 if (!snap.Exists) return null;
-                var dict = snap.ToDictionary();
-                dict["id"] = snap.Id;
-                dict["businessId"] = snap.Id;
-                return dict;
+                return SanitizeDoc(snap.ToDictionary(), snap.Id);
             }, null, $"GetBusiness {businessId}");
         }
 
@@ -324,13 +407,11 @@ namespace IrhamTrade.Server.Services
 
                 var tasks = bizSnap.Documents.Select(async bizDoc =>
                 {
-                    var bizDict = bizDoc.ToDictionary();
-                    bizDict["businessId"] = bizDoc.Id;
-                    bizDict["id"] = bizDoc.Id;
+                    var bizDict = SanitizeDoc(bizDoc.ToDictionary(), bizDoc.Id);
                     try
                     {
                         var devSnap = await _db.Collection("devices").WhereEqualTo("businessId", bizDoc.Id).Limit(50).GetSnapshotAsync();
-                        bizDict["devices"] = devSnap.Documents.Select(d => { var dd = d.ToDictionary(); dd["id"] = d.Id; return dd; }).ToList();
+                        bizDict["devices"] = devSnap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)).ToList();
                     }
                     catch { bizDict["devices"] = new List<Dictionary<string, object>>(); }
                     return bizDict;

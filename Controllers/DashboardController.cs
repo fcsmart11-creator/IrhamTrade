@@ -11,11 +11,14 @@ namespace IrhamTrade.Server.Controllers
         private readonly ILogger<DevicesController> _logger;
         public DevicesController(DashboardService svc, ILogger<DevicesController> logger) { _svc = svc; _logger = logger; }
 
-        // GET api/Devices - LIVE feed for ALL buyers - like Jiji browsing
         [HttpGet]
         public async Task<IActionResult> GetAll()
         {
-            try { var devices = await _svc.GetAllDevicesAsync(); return Ok(devices); }
+            try
+            {
+                var devices = await _svc.GetAllDevicesAsync();
+                return Ok(devices); // Now contains DateTime not Timestamp - JSON serializes fine
+            }
             catch (Exception ex) { _logger.LogError(ex, "GetAll Devices failed"); return Ok(new List<Dictionary<string, object>>()); }
         }
 
@@ -36,7 +39,7 @@ namespace IrhamTrade.Server.Controllers
                 if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to create device" });
                 return Ok(new { success = true, id, message = "Device created LIVE" });
             }
-            catch (Exception ex) { _logger.LogError(ex, "Create Device failed"); return StatusCode(500, new { success = false, message = "Unable to create device" }); }
+            catch (Exception ex) { _logger.LogError(ex, "Create Device failed"); return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
         [HttpPut("{deviceId}")]
@@ -90,10 +93,16 @@ namespace IrhamTrade.Server.Controllers
             try
             {
                 if (data == null) return BadRequest(new { success = false, message = "Interest data is required" });
+                // BOSS FIX: Log what APK sends to debug businessId missing
+                if (!data.ContainsKey("businessId") && !data.ContainsKey("ownerId"))
+                {
+                    _logger.LogWarning("Interest missing businessId! Data keys: {Keys}", string.Join(",", data.Keys));
+                }
                 var id = await _svc.CreateInterestAsync(data);
                 if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to submit interest" });
-                return Ok(new { success = true, id, message = "Interest submitted" });
+                return Ok(new { success = true, id, message = "Interest submitted - Business will see on Order button" });
             }
+            catch (ArgumentException argEx) { return BadRequest(new { success = false, message = argEx.Message }); }
             catch (Exception ex) { _logger.LogError(ex, "Create interest failed"); return StatusCode(500, new { success = false, message = "Unable to submit interest" }); }
         }
 

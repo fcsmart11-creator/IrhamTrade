@@ -51,7 +51,6 @@ namespace IrhamTrade.Server.Services
 
         private string GetJwtKey()
         {
-            // MUST match Program.cs key logic 100% - like Facebook single source of truth
             var key = _config["Jwt:Key"]
                ?? _config["Jwt__Key"]
                ?? Environment.GetEnvironmentVariable("Jwt__Key")
@@ -120,10 +119,7 @@ namespace IrhamTrade.Server.Services
                 {
                     return Fail("An account with this email already exists. Please log in instead");
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Firebase Auth create skipped, using DB only");
-                }
+                catch (Exception ex) { _logger.LogWarning(ex, "Firebase Auth create skipped, using DB only"); }
 
                 var user = new User
                 {
@@ -157,10 +153,10 @@ namespace IrhamTrade.Server.Services
                                 { "firebaseUid", firebaseUid },
                                 { "email", email },
                                 { "role", "business" },
-                                { "businessName", businessName },
-                                { "fullName", businessName },
-                                { "phone", phone },
-                                { "location", location },
+                                { "businessName", businessName.Trim() },
+                                { "fullName", businessName.Trim() },
+                                { "phone", phone.Trim() },
+                                { "location", location.Trim() },
                                 { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() },
                                 { "updatedAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
                             };
@@ -174,7 +170,6 @@ namespace IrhamTrade.Server.Services
 
                 var appUser = ToAppUser(user);
                 appUser.Token = GenerateJwt(user);
-
                 return new AuthResult { Success = true, Message = "Business account created successfully. Welcome to IRHAM TRADE!", User = appUser };
             }
             catch (DbUpdateException ex)
@@ -225,10 +220,7 @@ namespace IrhamTrade.Server.Services
                 {
                     return Fail("An account with this email already exists. Please log in instead");
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Firebase create skipped");
-                }
+                catch (Exception ex) { _logger.LogWarning(ex, "Firebase create skipped"); }
 
                 var user = new User
                 {
@@ -261,9 +253,9 @@ namespace IrhamTrade.Server.Services
                                 { "firebaseUid", firebaseUid },
                                 { "email", email },
                                 { "role", "buyer" },
-                                { "fullName", fullName },
-                                { "phone", phone },
-                                { "location", location },
+                                { "fullName", fullName.Trim() },
+                                { "phone", phone.Trim() },
+                                { "location", location.Trim() },
                                 { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
                             };
                             await _firebaseService.FirestoreDb.Collection("users").Document(user.Id.ToString()).SetAsync(data, Google.Cloud.Firestore.SetOptions.MergeAll);
@@ -277,7 +269,6 @@ namespace IrhamTrade.Server.Services
 
                 var appUser = ToAppUser(user);
                 appUser.Token = GenerateJwt(user);
-
                 return new AuthResult { Success = true, Message = "Buyer account created successfully. Welcome to IRHAM TRADE!", User = appUser };
             }
             catch (DbUpdateException)
@@ -292,7 +283,6 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // BOSS FIX - LOGIN - LIKE FACEBOOK - Always returns JWT (not Firebase token) so Server APIs work
         public async Task<AuthResult> LoginAsync(string email, string password)
         {
             if (string.IsNullOrWhiteSpace(email) || !email.Contains("@")) return Fail("Please enter a valid email address");
@@ -303,7 +293,6 @@ namespace IrhamTrade.Server.Services
 
             try
             {
-                // 1. TRY SQLITE (server-registered users)
                 var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
                 if (user != null)
                 {
@@ -313,17 +302,15 @@ namespace IrhamTrade.Server.Services
                         try { await _context.SaveChangesAsync(); } catch (Exception ex) { _logger.LogWarning(ex, "LastLogin update failed"); }
                         var appUser = ToAppUser(user);
                         appUser.Token = GenerateJwt(user);
-                        _logger.LogInformation("Login SUCCESS via SQLite {Email}", email);
+                        _logger.LogInformation("Login SUCCESS via SQLite {Email} Role {Role}", email, user.Role);
                         return new AuthResult { Success = true, Message = "Login successful", User = appUser };
                     }
-                    _logger.LogInformation("SQLite password mismatch for {Email}, trying Firebase fallback to sync", email);
+                    _logger.LogInformation("SQLite password mismatch for {Email}, trying Firebase fallback", email);
                 }
 
-                // 2. FIREBASE FALLBACK (APK-registered or password changed via Firebase)
                 var fbResult = await TryFirebaseLoginAsync(email, password);
                 if (fbResult.Success && fbResult.User != null)
                 {
-                    // If SQLite user exists, update its hash to match Firebase new password - like Facebook sync
                     if (user != null)
                     {
                         try
@@ -332,17 +319,26 @@ namespace IrhamTrade.Server.Services
                             user.LastLoginAt = DateTime.UtcNow;
                             if (string.IsNullOrWhiteSpace(user.FirebaseUid) && !string.IsNullOrWhiteSpace(fbResult.User.Id))
                                 user.FirebaseUid = fbResult.User.Id;
+                            // BOSS FIX: Sync missing fields from Firebase
+                            if (string.IsNullOrWhiteSpace(user.Phone) && !string.IsNullOrWhiteSpace(fbResult.User.Phone))
+                                user.Phone = fbResult.User.Phone;
+                            if (string.IsNullOrWhiteSpace(user.Location) && !string.IsNullOrWhiteSpace(fbResult.User.Location))
+                                user.Location = fbResult.User.Location;
+                            if (string.IsNullOrWhiteSpace(user.BusinessName) && !string.IsNullOrWhiteSpace(fbResult.User.BusinessName))
+                                user.BusinessName = fbResult.User.BusinessName;
+                            if (string.IsNullOrWhiteSpace(user.FullName) && !string.IsNullOrWhiteSpace(fbResult.User.FullName))
+                                user.FullName = fbResult.User.FullName;
+
                             await _context.SaveChangesAsync();
-                            _logger.LogInformation("Updated SQLite password from Firebase for {Email}", email);
+                            _logger.LogInformation("Updated SQLite from Firebase for {Email}", email);
                             var appUserUpdated = ToAppUser(user);
-                            appUserUpdated.Token = GenerateJwt(user); // BOSS FIX: Return JWT not Firebase token
+                            appUserUpdated.Token = GenerateJwt(user);
                             return new AuthResult { Success = true, Message = "Login successful", User = appUserUpdated };
                         }
-                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to update SQLite hash for {Email}", email); }
+                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to update SQLite for {Email}", email); }
                     }
                     else
                     {
-                        // No SQLite user - auto-create from Firebase
                         try
                         {
                             var role = fbResult.User.Role ?? "buyer";
@@ -351,8 +347,8 @@ namespace IrhamTrade.Server.Services
                                 Email = email,
                                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(password),
                                 Role = role.ToLowerInvariant(),
-                                FullName = fbResult.User.FullName ?? email.Split('@')[0],
-                                BusinessName = fbResult.User.BusinessName ?? (role == "business" ? fbResult.User.FullName ?? "" : ""),
+                                FullName = !string.IsNullOrWhiteSpace(fbResult.User.FullName) ? fbResult.User.FullName : email.Split('@')[0],
+                                BusinessName = !string.IsNullOrWhiteSpace(fbResult.User.BusinessName) ? fbResult.User.BusinessName : (role == "business" ? fbResult.User.FullName ?? "" : ""),
                                 Phone = fbResult.User.Phone ?? "",
                                 Location = fbResult.User.Location ?? "Ghana",
                                 FirebaseUid = fbResult.User.Id ?? "",
@@ -361,15 +357,14 @@ namespace IrhamTrade.Server.Services
                             };
                             _context.Users.Add(newUser);
                             await _context.SaveChangesAsync();
-                            _logger.LogInformation("Auto-created SQLite user from Firebase {Email} Role {Role}", email, role);
+                            _logger.LogInformation("Auto-created SQLite from Firebase {Email} Role {Role}", email, role);
                             var appUserNew = ToAppUser(newUser);
-                            appUserNew.Token = GenerateJwt(newUser); // JWT
+                            appUserNew.Token = GenerateJwt(newUser);
                             return new AuthResult { Success = true, Message = "Login successful", User = appUserNew };
                         }
-                        catch (Exception ex) { _logger.LogWarning(ex, "Auto-create SQLite from Firebase failed for {Email}", email); }
+                        catch (Exception ex) { _logger.LogWarning(ex, "Auto-create SQLite failed for {Email}", email); }
                     }
 
-                    // Fallback: If SQLite creation failed, still return JWT if possible - try to find/create
                     try
                     {
                         var tempUser = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
@@ -382,16 +377,26 @@ namespace IrhamTrade.Server.Services
                     }
                     catch { }
 
-                    // Last resort: return Firebase result but convert token to JWT-like (still allow login, APK will store it)
-                    // But try to generate JWT from Firebase user info
                     try
                     {
-                        var fakeUser = new User { Id = 999999, Email = email, Role = fbResult.User.Role ?? "buyer", BusinessName = fbResult.User.BusinessName ?? "", FullName = fbResult.User.FullName ?? "", FirebaseUid = fbResult.User.Id ?? "" };
+                        var fakeUser = new User
+                        {
+                            Id = 999999,
+                            Email = email,
+                            Role = fbResult.User.Role ?? "buyer",
+                            BusinessName = fbResult.User.BusinessName ?? "",
+                            FullName = fbResult.User.FullName ?? "",
+                            Phone = fbResult.User.Phone ?? "",
+                            Location = fbResult.User.Location ?? "",
+                            FirebaseUid = fbResult.User.Id ?? ""
+                        };
                         var appUserFake = ToAppUser(fakeUser);
                         appUserFake.Id = fbResult.User.Id;
                         appUserFake.Role = fbResult.User.Role ?? "buyer";
                         appUserFake.BusinessName = fbResult.User.BusinessName ?? "";
                         appUserFake.FullName = fbResult.User.FullName ?? "";
+                        appUserFake.Phone = fbResult.User.Phone ?? "";
+                        appUserFake.Location = fbResult.User.Location ?? "";
                         appUserFake.Token = GenerateJwt(fakeUser);
                         return new AuthResult { Success = true, Message = "Login successful", User = appUserFake };
                     }
@@ -431,7 +436,6 @@ namespace IrhamTrade.Server.Services
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
                 var uid = root.TryGetProperty("localId", out var lid) ? lid.GetString() ?? "" : "";
-                var idToken = root.TryGetProperty("idToken", out var it) ? it.GetString() ?? "" : "";
                 var displayName = root.TryGetProperty("displayName", out var dn) ? dn.GetString() ?? "" : "";
 
                 string role = "buyer";
@@ -456,14 +460,16 @@ namespace IrhamTrade.Server.Services
                             var dict = snap.ToDictionary();
                             if (dict.TryGetValue("role", out var r)) role = r?.ToString() ?? role;
                             if (dict.TryGetValue("fullName", out var fn) && !string.IsNullOrWhiteSpace(fn?.ToString())) fullName = fn!.ToString()!;
-                            if (dict.TryGetValue("businessName", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString())) { businessName = bn!.ToString()!; if (role == "business" && string.IsNullOrWhiteSpace(fullName)) fullName = businessName; }
-                            else if (dict.TryGetValue("fullName", out var fn2) && role == "business") businessName = fn2?.ToString() ?? "";
+                            if (dict.TryGetValue("businessName", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString())) { businessName = bn!.ToString()!; }
                             if (dict.TryGetValue("phone", out var ph)) phone = ph?.ToString() ?? "";
                             if (dict.TryGetValue("location", out var loc)) location = loc?.ToString() ?? location;
                         }
                     }
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "Firestore profile fetch failed for {Email}", email); }
+
+                if (role == "business" && string.IsNullOrWhiteSpace(fullName) && !string.IsNullOrWhiteSpace(businessName))
+                    fullName = businessName;
 
                 var appUser = new AppUser
                 {
@@ -474,10 +480,10 @@ namespace IrhamTrade.Server.Services
                     Phone = phone,
                     Location = location,
                     Email = email,
-                    Token = !string.IsNullOrWhiteSpace(idToken) ? idToken : ""
+                    Token = "" // BOSS FIX: Token empty - caller will generate JWT
                 };
 
-                _logger.LogInformation("Firebase login SUCCESS {Email} UID {Uid} Role {Role}", email, uid, role);
+                _logger.LogInformation("Firebase login SUCCESS {Email} UID {Uid} Role {Role} Name {Name}", email, uid, role, fullName);
                 return new AuthResult { Success = true, Message = "Login successful via Firebase", User = appUser };
             }
             catch (Exception ex)
@@ -494,29 +500,6 @@ namespace IrhamTrade.Server.Services
                 email = email.Trim().ToLowerInvariant();
                 var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
                 if (user == null) return Fail("No account found with this email. Please check email or create account.");
-
-                try
-                {
-                    if (_firebaseService.IsInitialized && _firebaseService.FirebaseAuth != null)
-                    {
-                        string link = "";
-                        if (!string.IsNullOrWhiteSpace(user.FirebaseUid))
-                        {
-                            link = await _firebaseService.FirebaseAuth.GeneratePasswordResetLinkAsync(email);
-                        }
-                        else
-                        {
-                            try
-                            {
-                                var fbUser = await _firebaseService.FirebaseAuth.GetUserByEmailAsync(email);
-                                if (fbUser != null) link = await _firebaseService.FirebaseAuth.GeneratePasswordResetLinkAsync(email);
-                            }
-                            catch { }
-                        }
-                    }
-                }
-                catch (Exception ex) { _logger.LogWarning(ex, "Firebase reset link generation failed for {Email}", email); }
-
                 return new AuthResult { Success = true, Message = $"Password reset instructions sent to {email}. Please check your inbox and spam folder." };
             }
             catch (Exception ex)
@@ -543,9 +526,7 @@ namespace IrhamTrade.Server.Services
                     if (_firebaseService.IsInitialized && _firebaseService.FirebaseAuth != null)
                     {
                         if (!string.IsNullOrWhiteSpace(user.FirebaseUid))
-                        {
                             await _firebaseService.FirebaseAuth.UpdateUserAsync(new UserRecordArgs { Uid = user.FirebaseUid, Password = newPassword });
-                        }
                         else
                         {
                             var fbUser = await _firebaseService.FirebaseAuth.GetUserByEmailAsync(email);
@@ -594,12 +575,7 @@ namespace IrhamTrade.Server.Services
 
         private DateTime? GetTokenExpiry(string token)
         {
-            try
-            {
-                var handler = new JwtSecurityTokenHandler();
-                var jwt = handler.ReadJwtToken(token);
-                return jwt.ValidTo;
-            }
+            try { var handler = new JwtSecurityTokenHandler(); var jwt = handler.ReadJwtToken(token); return jwt.ValidTo; }
             catch { return null; }
         }
 
@@ -609,7 +585,6 @@ namespace IrhamTrade.Server.Services
             var issuer = _config["Jwt:Issuer"] ?? "IrhamTrade.Server";
             var audience = _config["Jwt:Audience"] ?? "IrhamTrade.App";
             var expireMinutes = int.TryParse(_config["Jwt:ExpireMinutes"], out var m) ? m : 1440;
-
             var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
             var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
@@ -620,6 +595,8 @@ namespace IrhamTrade.Server.Services
                 new Claim(ClaimTypes.Role, user.Role),
                 new Claim("businessName", user.BusinessName?? ""),
                 new Claim("fullName", user.FullName?? ""),
+                new Claim("phone", user.Phone?? ""),
+                new Claim("location", user.Location?? ""),
                 new Claim("role", user.Role),
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
             };

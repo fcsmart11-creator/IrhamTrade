@@ -39,6 +39,7 @@ namespace IrhamTrade.Server.Controllers
                     return BadRequest(new { success = false, message = result.Message });
                 }
 
+                // BOSS FIX: Added phone, location, businessName, fullName variants - like Facebook returns full profile
                 return Ok(new
                 {
                     success = true,
@@ -46,8 +47,15 @@ namespace IrhamTrade.Server.Controllers
                     user_role = result.User!.Role,
                     role = result.User.Role,
                     business_name = result.User.BusinessName,
+                    businessName = result.User.BusinessName,
+                    fullName = result.User.FullName,
+                    name = result.User.BusinessName,
+                    phone = result.User.Phone,
+                    location = result.User.Location,
                     user_email = result.User.Email,
+                    email = result.User.Email,
                     user_id = result.User.Id,
+                    userId = result.User.Id,
                     user = result.User,
                     token = result.User.Token,
                     id = result.User.Id
@@ -77,6 +85,7 @@ namespace IrhamTrade.Server.Controllers
                     return BadRequest(new { success = false, message = result.Message });
                 }
 
+                // BOSS FIX: Added phone, location
                 return Ok(new
                 {
                     success = true,
@@ -85,8 +94,14 @@ namespace IrhamTrade.Server.Controllers
                     role = result.User.Role,
                     buyer_name = result.User.FullName,
                     fullName = result.User.FullName,
+                    businessName = result.User.BusinessName,
+                    name = result.User.FullName,
+                    phone = result.User.Phone,
+                    location = result.User.Location,
                     user_email = result.User.Email,
+                    email = result.User.Email,
                     user_id = result.User.Id,
+                    userId = result.User.Id,
                     user = result.User,
                     token = result.User.Token,
                     id = result.User.Id
@@ -116,6 +131,7 @@ namespace IrhamTrade.Server.Controllers
                     return Unauthorized(new { success = false, message = result.Message });
                 }
 
+                // BOSS FIX: MAIN LOGIC - Like Facebook - Return SAME account with role, name, phone, location - NO new account
                 return Ok(new
                 {
                     success = true,
@@ -124,10 +140,16 @@ namespace IrhamTrade.Server.Controllers
                     user_role = result.User!.Role,
                     role = result.User.Role,
                     business_name = result.User.BusinessName,
+                    businessName = result.User.BusinessName,
                     buyer_name = result.User.FullName,
                     fullName = result.User.FullName,
+                    name = string.IsNullOrWhiteSpace(result.User.BusinessName) ? result.User.FullName : result.User.BusinessName,
+                    phone = result.User.Phone,
+                    location = result.User.Location,
                     user_email = result.User.Email,
+                    email = result.User.Email,
                     user_id = result.User.Id,
+                    userId = result.User.Id,
                     user = result.User,
                     token = result.User.Token,
                     id = result.User.Id

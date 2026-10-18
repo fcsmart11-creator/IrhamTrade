@@ -67,6 +67,7 @@ namespace IrhamTrade.Server.Controllers
         }
     }
 
+    // BOSS FIX: InterestsController now correctly reads businessResponse + response + message from ALL payloads - fixes Accept not persisting message
     [ApiController]
     [Route("api/[controller]")]
     public class InterestsController : ControllerBase
@@ -117,8 +118,11 @@ namespace IrhamTrade.Server.Controllers
             if (body == null) return BadRequest(new { success = false, message = "Status is required" });
             var status = body.ContainsKey("status") ? body["status"]?.ToString() ?? "Pending" : "Pending";
             var businessName = body.ContainsKey("businessName") ? body["businessName"]?.ToString() : null;
+            // BOSS FIX: Check all possible response keys
             var businessResponse = body.ContainsKey("businessResponse") ? body["businessResponse"]?.ToString() : null;
-            if (string.IsNullOrEmpty(businessResponse) && body.ContainsKey("response")) businessResponse = body["response"]?.ToString();
+            if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("response")) businessResponse = body["response"]?.ToString();
+            if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("message")) businessResponse = body["message"]?.ToString();
+            if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("businessMessage")) businessResponse = body["businessMessage"]?.ToString();
 
             var ok = await _svc.UpdateInterestStatusAsync(interestId, status, businessName, businessResponse);
             return ok ? Ok(new { success = true, message = $"Status updated to {status}" }) : NotFound(new { success = false, message = "Interest not found" });
@@ -130,9 +134,11 @@ namespace IrhamTrade.Server.Controllers
             if (body == null) return BadRequest(new { success = false, message = "Body is required" });
             var status = body.ContainsKey("status") ? body["status"]?.ToString() ?? "Successful" : "Successful";
             var businessName = body.ContainsKey("businessName") ? body["businessName"]?.ToString() : null;
+            // BOSS FIX: Check all possible response keys
             var businessResponse = body.ContainsKey("businessResponse") ? body["businessResponse"]?.ToString() : null;
-            if (string.IsNullOrEmpty(businessResponse) && body.ContainsKey("response")) businessResponse = body["response"]?.ToString();
-            if (string.IsNullOrEmpty(businessResponse) && body.ContainsKey("message")) businessResponse = body["message"]?.ToString();
+            if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("response")) businessResponse = body["response"]?.ToString();
+            if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("message")) businessResponse = body["message"]?.ToString();
+            if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("businessMessage")) businessResponse = body["businessMessage"]?.ToString();
 
             var ok = await _svc.UpdateInterestStatusAsync(orderId, status, businessName, businessResponse);
             return ok ? Ok(new { success = true, message = $"Order {orderId} updated to {status}" }) : NotFound(new { success = false, message = "Order not found" });

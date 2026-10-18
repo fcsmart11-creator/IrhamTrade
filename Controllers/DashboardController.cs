@@ -29,6 +29,13 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex) { _logger.LogError(ex, "GetByBusiness failed {BusinessId}", businessId); return Ok(new List<Dictionary<string, object>>()); }
         }
 
+        [HttpGet("count/{businessId}")]
+        public async Task<IActionResult> GetCount(string businessId)
+        {
+            var count = await _svc.GetBusinessDeviceCountAsync(businessId);
+            return Ok(new { businessId, count, limit = 20, canPublish = count < 20 });
+        }
+
         [HttpPost]
         public async Task<IActionResult> Create([FromBody] Dictionary<string, object> data)
         {
@@ -39,6 +46,7 @@ namespace IrhamTrade.Server.Controllers
                 if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to create device" });
                 return Ok(new { success = true, id, message = "Device created" });
             }
+            catch (InvalidOperationException limitEx) { return BadRequest(new { success = false, message = limitEx.Message }); }
             catch (Exception ex) { _logger.LogError(ex, "Create Device failed"); return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
@@ -67,7 +75,6 @@ namespace IrhamTrade.Server.Controllers
         }
     }
 
-    // BOSS FIX: InterestsController now correctly reads businessResponse + response + message from ALL payloads - fixes Accept not persisting message
     [ApiController]
     [Route("api/[controller]")]
     public class InterestsController : ControllerBase
@@ -112,18 +119,30 @@ namespace IrhamTrade.Server.Controllers
         [HttpGet("business/{businessId}")]
         public async Task<IActionResult> GetByBusiness(string businessId) => Ok(await _svc.GetBusinessInterestsAsync(businessId));
 
+        [HttpPost("{interestId}/accept")]
+        public async Task<IActionResult> AcceptToTransaction(string interestId, [FromBody] Dictionary<string, object> body)
+        {
+            var businessName = body != null && body.ContainsKey("businessName") ? body["businessName"]?.ToString() ?? "" : "";
+            if (string.IsNullOrWhiteSpace(businessName)) businessName = body != null && body.ContainsKey("business_name") ? body["business_name"]?.ToString() ?? "" : "";
+            try
+            {
+                var transId = await _svc.AcceptOrderToTransactionAsync(interestId, businessName);
+                if (string.IsNullOrEmpty(transId)) return NotFound(new { success = false, message = "Order not found" });
+                return Ok(new { success = true, transactionId = transId, message = "Order moved to transaction, device removed from store" });
+            }
+            catch (Exception ex) { _logger.LogError(ex, "Accept to transaction failed {InterestId}", interestId); return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
         [HttpPut("{interestId}/status")]
         public async Task<IActionResult> UpdateStatusPut(string interestId, [FromBody] Dictionary<string, object> body)
         {
             if (body == null) return BadRequest(new { success = false, message = "Status is required" });
             var status = body.ContainsKey("status") ? body["status"]?.ToString() ?? "Pending" : "Pending";
             var businessName = body.ContainsKey("businessName") ? body["businessName"]?.ToString() : null;
-            // BOSS FIX: Check all possible response keys
             var businessResponse = body.ContainsKey("businessResponse") ? body["businessResponse"]?.ToString() : null;
             if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("response")) businessResponse = body["response"]?.ToString();
             if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("message")) businessResponse = body["message"]?.ToString();
             if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("businessMessage")) businessResponse = body["businessMessage"]?.ToString();
-
             var ok = await _svc.UpdateInterestStatusAsync(interestId, status, businessName, businessResponse);
             return ok ? Ok(new { success = true, message = $"Status updated to {status}" }) : NotFound(new { success = false, message = "Interest not found" });
         }
@@ -134,14 +153,42 @@ namespace IrhamTrade.Server.Controllers
             if (body == null) return BadRequest(new { success = false, message = "Body is required" });
             var status = body.ContainsKey("status") ? body["status"]?.ToString() ?? "Successful" : "Successful";
             var businessName = body.ContainsKey("businessName") ? body["businessName"]?.ToString() : null;
-            // BOSS FIX: Check all possible response keys
             var businessResponse = body.ContainsKey("businessResponse") ? body["businessResponse"]?.ToString() : null;
             if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("response")) businessResponse = body["response"]?.ToString();
             if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("message")) businessResponse = body["message"]?.ToString();
             if (string.IsNullOrWhiteSpace(businessResponse) && body.ContainsKey("businessMessage")) businessResponse = body["businessMessage"]?.ToString();
-
             var ok = await _svc.UpdateInterestStatusAsync(orderId, status, businessName, businessResponse);
             return ok ? Ok(new { success = true, message = $"Order {orderId} updated to {status}" }) : NotFound(new { success = false, message = "Order not found" });
+        }
+    }
+
+    [ApiController]
+    [Route("api/[controller]")]
+    public class TransactionsController : ControllerBase
+    {
+        private readonly DashboardService _svc;
+        private readonly ILogger<TransactionsController> _logger;
+        public TransactionsController(DashboardService svc, ILogger<TransactionsController> logger) { _svc = svc; _logger = logger; }
+
+        [HttpGet("business/{businessId}")]
+        public async Task<IActionResult> GetByBusiness(string businessId)
+        {
+            try { return Ok(await _svc.GetTransactionsByBusinessAsync(businessId)); }
+            catch (Exception ex) { _logger.LogError(ex, "Get transactions failed {BusinessId}", businessId); return Ok(new List<Dictionary<string, object>>()); }
+        }
+
+        [HttpPut("{transactionId}/complete")]
+        public async Task<IActionResult> Complete(string transactionId)
+        {
+            var ok = await _svc.CompleteTransactionAsync(transactionId);
+            return ok ? Ok(new { success = true, message = "Transaction completed, product sold" }) : NotFound(new { success = false, message = "Transaction not found" });
+        }
+
+        [HttpPut("{transactionId}/incomplete")]
+        public async Task<IActionResult> Incomplete(string transactionId)
+        {
+            var ok = await _svc.IncompleteTransactionAsync(transactionId);
+            return ok ? Ok(new { success = true, message = "Transaction incomplete, product republished to inventory" }) : NotFound(new { success = false, message = "Transaction not found" });
         }
     }
 

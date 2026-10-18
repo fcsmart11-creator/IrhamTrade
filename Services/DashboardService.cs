@@ -62,7 +62,6 @@ namespace IrhamTrade.Server.Services
             return clean;
         }
 
-        // BOSS FIX: SanitizeInterest now normalizes all fields for Order Button + That's What - fixes picture + name
         private static Dictionary<string, object> SanitizeInterest(Dictionary<string, object> data, string docId)
         {
             var clean = new Dictionary<string, object>();
@@ -71,7 +70,6 @@ namespace IrhamTrade.Server.Services
             clean["interestId"] = docId;
             clean["orderId"] = docId;
 
-            // Normalize product name
             if (!clean.ContainsKey("productName") || string.IsNullOrWhiteSpace(clean["productName"]?.ToString()))
             {
                 var name = GetString(clean, "name");
@@ -80,7 +78,6 @@ namespace IrhamTrade.Server.Services
             }
             if (!clean.ContainsKey("name") && clean.TryGetValue("productName", out var pn)) clean["name"] = pn;
 
-            // Normalize image - keep all variants
             var img = GetString(clean, "productImage");
             if (string.IsNullOrWhiteSpace(img)) img = GetString(clean, "imageBase64");
             if (string.IsNullOrWhiteSpace(img)) img = GetString(clean, "image");
@@ -92,11 +89,9 @@ namespace IrhamTrade.Server.Services
                 clean["imageUrl"] = img;
             }
 
-            // Normalize price, brand
             if (!clean.ContainsKey("price") && clean.TryGetValue("productPrice", out var pp)) clean["price"] = pp;
             if (!clean.ContainsKey("productPrice") && clean.TryGetValue("price", out var p)) clean["productPrice"] = p;
 
-            // Normalize buyer fields
             if (!clean.ContainsKey("buyerName"))
             {
                 var bn = GetString(clean, "fullName");
@@ -104,19 +99,41 @@ namespace IrhamTrade.Server.Services
                 else clean["buyerName"] = GetString(clean, "name");
             }
 
-            // Normalize business fields
             if (!clean.ContainsKey("businessName"))
             {
                 var bnn = GetString(clean, "business_name");
                 if (!string.IsNullOrWhiteSpace(bnn)) clean["businessName"] = bnn;
             }
 
-            // Ensure status
             if (!clean.ContainsKey("status") || string.IsNullOrWhiteSpace(clean["status"]?.ToString())) clean["status"] = "Pending";
             if (!clean.ContainsKey("businessResponse")) clean["businessResponse"] = "";
             if (!clean.ContainsKey("response") && clean.TryGetValue("businessResponse", out var br)) clean["response"] = br;
             if (!clean.ContainsKey("message") && clean.TryGetValue("businessResponse", out var br2)) clean["message"] = br2;
 
+            return clean;
+        }
+
+        private static Dictionary<string, object> SanitizeTransaction(Dictionary<string, object> data, string docId)
+        {
+            var clean = new Dictionary<string, object>();
+            foreach (var kv in data) clean[kv.Key] = ConvertValue(kv.Value);
+            clean["id"] = docId;
+            clean["transactionId"] = docId;
+
+            var img = GetString(clean, "productImage");
+            if (string.IsNullOrWhiteSpace(img)) img = GetString(clean, "imageBase64");
+            if (string.IsNullOrWhiteSpace(img)) img = GetString(clean, "image");
+            if (string.IsNullOrWhiteSpace(img)) img = GetString(clean, "imageUrl");
+            if (!string.IsNullOrWhiteSpace(img))
+            {
+                clean["productImage"] = img;
+                clean["imageBase64"] = img;
+                clean["imageUrl"] = img;
+            }
+
+            if (!clean.ContainsKey("productName") && clean.TryGetValue("name", out var n)) clean["productName"] = n;
+            if (!clean.ContainsKey("name") && clean.TryGetValue("productName", out var pn)) clean["name"] = pn;
+            if (!clean.ContainsKey("transactionStatus") || string.IsNullOrWhiteSpace(clean["transactionStatus"]?.ToString())) clean["transactionStatus"] = "InProgress";
             return clean;
         }
 
@@ -164,6 +181,17 @@ namespace IrhamTrade.Server.Services
             }, new List<Dictionary<string, object>>(), $"GetDevicesByBusiness {businessId}");
         }
 
+        public async Task<int> GetBusinessDeviceCountAsync(string businessId)
+        {
+            if (string.IsNullOrWhiteSpace(businessId)) return 0;
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                if (snap.Count == 0) snap = await _db.Collection("devices").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
+                return snap.Count;
+            }, 0, $"GetCount {businessId}");
+        }
+
         public async Task<string> CreateDeviceAsync(Dictionary<string, object> data)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
@@ -173,6 +201,15 @@ namespace IrhamTrade.Server.Services
                 if (string.IsNullOrWhiteSpace(name)) name = GetString(data, "model");
                 if (string.IsNullOrWhiteSpace(name)) name = GetString(data, "productName");
                 if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Device name is required");
+
+                var businessId = GetString(data, "businessId");
+                if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "business_id");
+                if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "ownerId");
+                if (string.IsNullOrWhiteSpace(businessId)) throw new ArgumentException("businessId is required");
+
+                var count = await GetBusinessDeviceCountAsync(businessId);
+                if (count >= 20) throw new InvalidOperationException("Free limit reached: 20 items max. Upgrade to publish more.");
+
                 var brand = GetString(data, "brand");
                 var price = GetString(data, "price");
                 var priceNum = GetString(data, "productPrice");
@@ -180,9 +217,6 @@ namespace IrhamTrade.Server.Services
                 var contactNumber = GetString(data, "contactNumber");
                 if (string.IsNullOrWhiteSpace(contactNumber)) contactNumber = GetString(data, "contact");
                 if (string.IsNullOrWhiteSpace(contactNumber)) contactNumber = GetString(data, "phone");
-                var businessId = GetString(data, "businessId");
-                if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "business_id");
-                if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "ownerId");
                 var businessName = GetString(data, "businessName");
                 var description = GetString(data, "description");
                 if (string.IsNullOrWhiteSpace(description)) description = name;
@@ -263,7 +297,6 @@ namespace IrhamTrade.Server.Services
             }, false, $"DeleteDevice {deviceId}");
         }
 
-        // BOSS FIX: CreateInterest now fetches device to copy product details - fixes Order Button picture + buyer info
         public async Task<string> CreateInterestAsync(Dictionary<string, object> data)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
@@ -282,7 +315,6 @@ namespace IrhamTrade.Server.Services
                 if (string.IsNullOrWhiteSpace(businessId)) throw new ArgumentException("businessId is required for Order");
                 if (string.IsNullOrWhiteSpace(productId)) throw new ArgumentException("productId is required");
 
-                // Fetch device details to copy if missing - critical for picture + price
                 try
                 {
                     if (string.IsNullOrWhiteSpace(GetString(data, "productName")) || string.IsNullOrWhiteSpace(GetString(data, "price")) || string.IsNullOrWhiteSpace(GetString(data, "imageBase64")))
@@ -336,7 +368,6 @@ namespace IrhamTrade.Server.Services
             }, null!, "CreateInterest");
         }
 
-        // BOSS FIX: GetBuyerInterests checks buyerId + userId + buyerEmail + deduplicates - fixes That's What crash + empty
         public async Task<List<Dictionary<string, object>>> GetBuyerInterestsAsync(string buyerId)
         {
             if (string.IsNullOrWhiteSpace(buyerId)) return new();
@@ -344,7 +375,6 @@ namespace IrhamTrade.Server.Services
             {
                 var all = new List<Dictionary<string, object>>();
                 var seenIds = new HashSet<string>();
-
                 var fieldsToTry = new[] { "buyerId", "userId" };
                 foreach (var field in fieldsToTry)
                 {
@@ -360,8 +390,6 @@ namespace IrhamTrade.Server.Services
                     }
                     catch { }
                 }
-
-                // Also try orders collection
                 try
                 {
                     var snap = await _db.Collection("orders").WhereEqualTo("buyerId", buyerId).GetSnapshotAsync();
@@ -373,13 +401,11 @@ namespace IrhamTrade.Server.Services
                     }
                 }
                 catch { }
-
                 all = all.OrderByDescending(d => { if (d.TryGetValue("createdAt", out var v) && v is DateTime dt) return dt; return DateTime.MinValue; }).ToList();
                 return all;
             }, new List<Dictionary<string, object>>(), $"GetBuyerInterests {buyerId}");
         }
 
-        // BOSS FIX: GetBusinessInterests combines interests + orders + businessId + ownerId + deduplicates - fixes 0 Orders bug
         public async Task<List<Dictionary<string, object>>> GetBusinessInterestsAsync(string businessId)
         {
             if (string.IsNullOrWhiteSpace(businessId)) return new();
@@ -387,10 +413,8 @@ namespace IrhamTrade.Server.Services
             {
                 var all = new List<Dictionary<string, object>>();
                 var seenIds = new HashSet<string>();
-
                 var collections = new[] { "interests", "orders" };
                 var fields = new[] { "businessId", "ownerId" };
-
                 foreach (var coll in collections)
                 {
                     foreach (var field in fields)
@@ -408,14 +432,12 @@ namespace IrhamTrade.Server.Services
                         catch (Exception ex) { _logger.LogWarning(ex, "Query failed {Coll} {Field} {Biz}", coll, field, businessId); }
                     }
                 }
-
                 all = all.OrderByDescending(d => { if (d.TryGetValue("createdAt", out var v) && v is DateTime dt) return dt; return DateTime.MinValue; }).ToList();
                 _logger.LogInformation("GetBusinessInterests {Biz} total {Count}", businessId, all.Count);
                 return all;
             }, new List<Dictionary<string, object>>(), $"GetBusinessInterests {businessId}");
         }
 
-        // BOSS FIX: UpdateInterest now updates BOTH interests + orders + sets professional default messages + businessName - fixes Accept not persisting to buyer
         public async Task<bool> UpdateInterestStatusAsync(string interestId, string status, string? businessName = null, string? businessResponse = null)
         {
             if (string.IsNullOrWhiteSpace(interestId) || string.IsNullOrWhiteSpace(status)) return false;
@@ -426,9 +448,7 @@ namespace IrhamTrade.Server.Services
                     ["status"] = status,
                     ["updatedAt"] = Timestamp.GetCurrentTimestamp()
                 };
-
                 if (!string.IsNullOrWhiteSpace(businessName)) updateData["businessName"] = businessName;
-
                 if (!string.IsNullOrWhiteSpace(businessResponse))
                 {
                     updateData["businessResponse"] = businessResponse;
@@ -441,13 +461,11 @@ namespace IrhamTrade.Server.Services
                         updateData["businessResponse"] = "We will get in touch with you soon. Please wait for our call or WhatsApp message.";
                     else if (status.Equals("Failed", StringComparison.OrdinalIgnoreCase))
                         updateData["businessResponse"] = "Sorry, this product is no longer available. The business is currently busy.";
-
                     updateData["response"] = updateData["businessResponse"];
                     updateData["message"] = updateData["businessResponse"];
                 }
 
                 bool found = false;
-
                 try
                 {
                     var docRef = _db.Collection("interests").Document(interestId);
@@ -459,7 +477,6 @@ namespace IrhamTrade.Server.Services
                     }
                 }
                 catch { }
-
                 try
                 {
                     var orderRef = _db.Collection("orders").Document(interestId);
@@ -471,13 +488,11 @@ namespace IrhamTrade.Server.Services
                     }
                     else if (found)
                     {
-                        // If found in interests but not orders, create in orders too
                         await orderRef.SetAsync(updateData, SetOptions.MergeAll);
                     }
                 }
                 catch { }
 
-                // Fallback search by orderId field
                 if (!found)
                 {
                     try
@@ -491,7 +506,6 @@ namespace IrhamTrade.Server.Services
                     }
                     catch { }
                 }
-
                 if (!found)
                 {
                     try
@@ -505,10 +519,225 @@ namespace IrhamTrade.Server.Services
                     }
                     catch { }
                 }
-
                 _logger.LogInformation("UpdateInterest {Id} to {Status} found={Found} Biz={Biz}", interestId, status, found, businessName);
                 return found;
             }, false, $"UpdateInterest {interestId}");
+        }
+
+        public async Task<string> AcceptOrderToTransactionAsync(string interestId, string businessName)
+        {
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var interestSnap = await _db.Collection("interests").Document(interestId).GetSnapshotAsync();
+                if (!interestSnap.Exists) interestSnap = await _db.Collection("orders").Document(interestId).GetSnapshotAsync();
+                if (!interestSnap.Exists) throw new ArgumentException("Order not found");
+
+                var interestData = interestSnap.ToDictionary();
+                var productId = GetString(interestData, "productId");
+                if (string.IsNullOrWhiteSpace(productId)) productId = GetString(interestData, "deviceId");
+                var buyerId = GetString(interestData, "buyerId");
+                var buyerName = GetString(interestData, "buyerName");
+                var buyerPhone = GetString(interestData, "buyerPhone");
+                if (string.IsNullOrWhiteSpace(buyerPhone)) buyerPhone = GetString(interestData, "buyerContact");
+                if (string.IsNullOrWhiteSpace(buyerPhone)) buyerPhone = GetString(interestData, "phone");
+                var buyerLocation = GetString(interestData, "buyerLocation");
+                if (string.IsNullOrWhiteSpace(buyerLocation)) buyerLocation = GetString(interestData, "location");
+
+                var businessId = GetString(interestData, "businessId");
+                if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(interestData, "ownerId");
+
+                Dictionary<string, object> deviceData = new();
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(productId))
+                    {
+                        var devSnap = await _db.Collection("devices").Document(productId).GetSnapshotAsync();
+                        if (devSnap.Exists) deviceData = devSnap.ToDictionary();
+                    }
+                }
+                catch { }
+
+                var transactionData = new Dictionary<string, object>
+                {
+                    ["transactionId"] = Guid.NewGuid().ToString("N"),
+                    ["interestId"] = interestId,
+                    ["productId"] = productId,
+                    ["deviceId"] = productId,
+                    ["businessId"] = businessId,
+                    ["ownerId"] = businessId,
+                    ["businessName"] = businessName,
+                    ["buyerId"] = buyerId,
+                    ["buyerName"] = buyerName,
+                    ["buyerPhone"] = buyerPhone,
+                    ["buyerLocation"] = buyerLocation,
+                    ["productName"] = GetString(interestData, "productName") != "" ? GetString(interestData, "productName") : GetString(deviceData, "name"),
+                    ["name"] = GetString(interestData, "productName") != "" ? GetString(interestData, "productName") : GetString(deviceData, "name"),
+                    ["price"] = GetString(interestData, "price") != "" ? GetString(interestData, "price") : GetString(deviceData, "price"),
+                    ["productPrice"] = GetString(interestData, "price") != "" ? GetString(interestData, "price") : GetString(deviceData, "price"),
+                    ["brand"] = GetString(deviceData, "brand"),
+                    ["description"] = GetString(deviceData, "description"),
+                    ["imageBase64"] = GetString(interestData, "productImage") != "" ? GetString(interestData, "productImage") : GetString(deviceData, "imageBase64"),
+                    ["productImage"] = GetString(interestData, "productImage") != "" ? GetString(interestData, "productImage") : GetString(deviceData, "imageBase64"),
+                    ["imageUrl"] = GetString(interestData, "productImage") != "" ? GetString(interestData, "productImage") : GetString(deviceData, "imageBase64"),
+                    ["contactNumber"] = GetString(deviceData, "contactNumber"),
+                    ["location"] = GetString(deviceData, "location"),
+                    ["category"] = GetString(deviceData, "category"),
+                    ["transactionStatus"] = "InProgress",
+                    ["status"] = "Successful",
+                    ["businessResponse"] = "We will get in touch with you soon. Please wait for our call or WhatsApp message.",
+                    ["response"] = "We will get in touch with you soon. Please wait for our call or WhatsApp message.",
+                    ["message"] = "We will get in touch with you soon. Please wait for our call or WhatsApp message.",
+                    ["createdAt"] = Timestamp.GetCurrentTimestamp(),
+                    ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                };
+
+                var transRef = await _db.Collection("transactions").AddAsync(transactionData);
+
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(productId))
+                    {
+                        await _db.Collection("devices").Document(productId).DeleteAsync();
+                        try { await _db.Collection("products").Document(productId).DeleteAsync(); } catch { }
+                    }
+                }
+                catch (Exception ex) { _logger.LogWarning(ex, "Failed to delete device {ProductId} on accept", productId); }
+
+                var updateData = new Dictionary<string, object>
+                {
+                    ["status"] = "Successful",
+                    ["businessName"] = businessName,
+                    ["businessResponse"] = "We will get in touch with you soon. Please wait for our call or WhatsApp message.",
+                    ["response"] = "We will get in touch with you soon. Please wait for our call or WhatsApp message.",
+                    ["message"] = "We will get in touch with you soon. Please wait for our call or WhatsApp message.",
+                    ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                };
+                try { await _db.Collection("interests").Document(interestId).SetAsync(updateData, SetOptions.MergeAll); } catch { }
+                try { await _db.Collection("orders").Document(interestId).SetAsync(updateData, SetOptions.MergeAll); } catch { }
+
+                _logger.LogInformation("Order {InterestId} accepted to transaction {TransId}", interestId, transRef.Id);
+                return transRef.Id;
+            }, null!, $"AcceptToTransaction {interestId}");
+        }
+
+        public async Task<List<Dictionary<string, object>>> GetTransactionsByBusinessAsync(string businessId)
+        {
+            if (string.IsNullOrWhiteSpace(businessId)) return new();
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var all = new List<Dictionary<string, object>>();
+                var snap = await _db.Collection("transactions").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                if (snap.Count == 0) snap = await _db.Collection("transactions").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
+                foreach (var doc in snap.Documents) all.Add(SanitizeTransaction(doc.ToDictionary(), doc.Id));
+                all = all.OrderByDescending(d => { if (d.TryGetValue("createdAt", out var v) && v is DateTime dt) return dt; return DateTime.MinValue; }).ToList();
+                return all;
+            }, new List<Dictionary<string, object>>(), $"GetTransactions {businessId}");
+        }
+
+        public async Task<bool> CompleteTransactionAsync(string transactionId)
+        {
+            if (string.IsNullOrWhiteSpace(transactionId)) return false;
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var update = new Dictionary<string, object>
+                {
+                    ["transactionStatus"] = "Completed",
+                    ["status"] = "Completed",
+                    ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                };
+                await _db.Collection("transactions").Document(transactionId).SetAsync(update, SetOptions.MergeAll);
+                return true;
+            }, false, $"CompleteTransaction {transactionId}");
+        }
+
+        public async Task<bool> IncompleteTransactionAsync(string transactionId)
+        {
+            if (string.IsNullOrWhiteSpace(transactionId)) return false;
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var snap = await _db.Collection("transactions").Document(transactionId).GetSnapshotAsync();
+                if (!snap.Exists) return false;
+                var data = snap.ToDictionary();
+
+                var productId = GetString(data, "productId");
+                if (string.IsNullOrWhiteSpace(productId)) productId = Guid.NewGuid().ToString("N");
+                var businessId = GetString(data, "businessId");
+                var businessName = GetString(data, "businessName");
+                var name = GetString(data, "productName");
+                if (string.IsNullOrWhiteSpace(name)) name = GetString(data, "name");
+                var price = GetString(data, "price");
+                if (string.IsNullOrWhiteSpace(price)) price = GetString(data, "productPrice");
+                var brand = GetString(data, "brand");
+                var desc = GetString(data, "description");
+                if (string.IsNullOrWhiteSpace(desc)) desc = name;
+                var img = GetString(data, "productImage");
+                if (string.IsNullOrWhiteSpace(img)) img = GetString(data, "imageBase64");
+                if (string.IsNullOrWhiteSpace(img)) img = GetString(data, "imageUrl");
+                var contact = GetString(data, "contactNumber");
+                var location = GetString(data, "location");
+                var category = GetString(data, "category");
+                if (string.IsNullOrWhiteSpace(category)) category = "General";
+
+                var now = Timestamp.GetCurrentTimestamp();
+                var firestoreData = new Dictionary<string, object>
+                {
+                    ["id"] = productId,
+                    ["deviceId"] = productId,
+                    ["productId"] = productId,
+                    ["name"] = name,
+                    ["productName"] = name,
+                    ["model"] = name,
+                    ["brand"] = brand,
+                    ["category"] = category,
+                    ["price"] = price,
+                    ["productPrice"] = price,
+                    ["contactNumber"] = contact,
+                    ["businessId"] = businessId,
+                    ["ownerId"] = businessId,
+                    ["businessName"] = businessName,
+                    ["description"] = desc,
+                    ["status"] = "active",
+                    ["isAvailable"] = true,
+                    ["isActive"] = true,
+                    ["imageBase64"] = img,
+                    ["imageUrl"] = img,
+                    ["hasImage"] = !string.IsNullOrWhiteSpace(img),
+                    ["location"] = location,
+                    ["stock"] = 100,
+                    ["createdAt"] = now,
+                    ["updatedAt"] = now
+                };
+
+                await _db.Collection("devices").Document(productId).SetAsync(firestoreData);
+                try { await _db.Collection("products").Document(productId).SetAsync(firestoreData, SetOptions.MergeAll); } catch { }
+
+                var transUpdate = new Dictionary<string, object>
+                {
+                    ["transactionStatus"] = "Incomplete",
+                    ["status"] = "Incomplete",
+                    ["republished"] = true,
+                    ["republishedDeviceId"] = productId,
+                    ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                };
+                await _db.Collection("transactions").Document(transactionId).SetAsync(transUpdate, SetOptions.MergeAll);
+
+                var interestId = GetString(data, "interestId");
+                if (!string.IsNullOrWhiteSpace(interestId))
+                {
+                    var failUpdate = new Dictionary<string, object>
+                    {
+                        ["status"] = "Failed",
+                        ["businessResponse"] = "Sorry, this product is back in stock. Business marked transaction incomplete.",
+                        ["response"] = "Sorry, this product is back in stock. Business marked transaction incomplete.",
+                        ["message"] = "Sorry, this product is back in stock. Business marked transaction incomplete.",
+                        ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                    };
+                    try { await _db.Collection("interests").Document(interestId).SetAsync(failUpdate, SetOptions.MergeAll); } catch { }
+                    try { await _db.Collection("orders").Document(interestId).SetAsync(failUpdate, SetOptions.MergeAll); } catch { }
+                }
+
+                return true;
+            }, false, $"IncompleteTransaction {transactionId}");
         }
 
         public async Task<Dictionary<string, object>?> GetBuyerProfileAsync(string buyerId)

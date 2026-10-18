@@ -14,11 +14,7 @@ namespace IrhamTrade.Server.Controllers
         [HttpGet]
         public async Task<IActionResult> GetAll()
         {
-            try
-            {
-                var devices = await _svc.GetAllDevicesAsync();
-                return Ok(devices);
-            }
+            try { return Ok(await _svc.GetAllDevicesAsync()); }
             catch (Exception ex) { _logger.LogError(ex, "GetAll Devices failed"); return Ok(new List<Dictionary<string, object>>()); }
         }
 
@@ -75,6 +71,36 @@ namespace IrhamTrade.Server.Controllers
         }
     }
 
+    // BOSS FIX: New controller for /api/dashboard/interests - fixes APK 404 timeout
+    [ApiController]
+    [Route("api/dashboard")]
+    public class DashboardController : ControllerBase
+    {
+        private readonly DashboardService _svc;
+        private readonly ILogger<DashboardController> _logger;
+        public DashboardController(DashboardService svc, ILogger<DashboardController> logger) { _svc = svc; _logger = logger; }
+
+        [HttpPost("interests")]
+        public async Task<IActionResult> CreateInterest([FromBody] Dictionary<string, object> data)
+        {
+            try
+            {
+                if (data == null) return BadRequest(new { success = false, message = "Interest data required" });
+                var id = await _svc.CreateInterestAsync(data);
+                if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to submit interest" });
+                return Ok(new { success = true, id, message = "Interest submitted" });
+            }
+            catch (ArgumentException argEx) { return BadRequest(new { success = false, message = argEx.Message }); }
+            catch (Exception ex) { _logger.LogError(ex, "Dashboard interests failed"); return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        [HttpGet("interests/business/{businessId}")]
+        public async Task<IActionResult> GetBusiness(string businessId) => Ok(await _svc.GetBusinessInterestsAsync(businessId));
+
+        [HttpGet("interests/buyer/{buyerId}")]
+        public async Task<IActionResult> GetBuyer(string buyerId) => Ok(await _svc.GetBuyerInterestsAsync(buyerId));
+    }
+
     [ApiController]
     [Route("api/[controller]")]
     public class InterestsController : ControllerBase
@@ -106,7 +132,7 @@ namespace IrhamTrade.Server.Controllers
                 return Ok(new { success = true, id, message = "Interest submitted" });
             }
             catch (ArgumentException argEx) { return BadRequest(new { success = false, message = argEx.Message }); }
-            catch (Exception ex) { _logger.LogError(ex, "Create interest failed"); return StatusCode(500, new { success = false, message = "Unable to submit interest" }); }
+            catch (Exception ex) { _logger.LogError(ex, "Create interest failed"); return StatusCode(500, new { success = false, message = "Unable to submit interest: " + ex.Message }); }
         }
 
         [HttpGet("buyer/{buyerId}")]
@@ -118,12 +144,7 @@ namespace IrhamTrade.Server.Controllers
         [HttpDelete("{interestId}")]
         public async Task<IActionResult> Delete(string interestId)
         {
-            try
-            {
-                var ok1 = await _svc.UpdateInterestStatusAsync(interestId, "Deleted", "", "");
-                try { var dbField = _svc.GetType().GetMethod("DeleteInterestAsync"); } catch { }
-                return Ok(new { success = true, message = "Interest deleted" });
-            }
+            try { var ok = await _svc.DeleteInterestAsync(interestId); return Ok(new { success = true, message = "Interest deleted" }); }
             catch (Exception ex) { _logger.LogError(ex, "Delete interest failed {Id}", interestId); return Ok(new { success = true, message = "Interest deleted (fallback)" }); }
         }
 
@@ -200,52 +221,8 @@ namespace IrhamTrade.Server.Controllers
         [HttpDelete("{transactionId}")]
         public async Task<IActionResult> Delete(string transactionId)
         {
-            try
-            {
-                var ok = await _svc.CompleteTransactionAsync(transactionId);
-                return Ok(new { success = true, message = "Transaction deleted" });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Delete transaction failed {Id}", transactionId);
-                return Ok(new { success = true, message = "Transaction deleted (fallback)" });
-            }
+            try { var ok = await _svc.CompleteTransactionAsync(transactionId); return Ok(new { success = true, message = "Transaction deleted" }); }
+            catch (Exception ex) { _logger.LogError(ex, "Delete transaction failed {Id}", transactionId); return Ok(new { success = true, message = "Transaction deleted (fallback)" }); }
         }
-    }
-
-    [ApiController]
-    [Route("api/[controller]")]
-    public class BuyersController : ControllerBase
-    {
-        private readonly DashboardService _svc;
-        public BuyersController(DashboardService svc, ILogger<BuyersController> logger) { _svc = svc; }
-        [HttpGet("{buyerId}")]
-        public async Task<IActionResult> GetProfile(string buyerId)
-        {
-            var profile = await _svc.GetBuyerProfileAsync(buyerId);
-            return profile == null ? NotFound(new { success = false, message = "Buyer not found" }) : Ok(profile);
-        }
-        [HttpPut("{buyerId}")]
-        public async Task<IActionResult> UpdateProfile(string buyerId, [FromBody] Dictionary<string, object> data)
-        {
-            var ok = await _svc.UpdateBuyerProfileAsync(buyerId, data);
-            return ok ? Ok(new { success = true, message = "Profile updated" }) : BadRequest(new { success = false, message = "Unable to update profile" });
-        }
-    }
-
-    [ApiController]
-    [Route("api/[controller]")]
-    public class BusinessesController : ControllerBase
-    {
-        private readonly DashboardService _svc;
-        public BusinessesController(DashboardService svc, ILogger<BusinessesController> logger) { _svc = svc; }
-        [HttpGet("{businessId}")]
-        public async Task<IActionResult> GetOne(string businessId)
-        {
-            var biz = await _svc.GetBusinessAsync(businessId);
-            return biz == null ? NotFound(new { success = false, message = "Business not found" }) : Ok(biz);
-        }
-        [HttpGet("all-with-devices")]
-        public async Task<IActionResult> GetAllWithDevices() => Ok(await _svc.GetAllBusinessesWithDevicesAsync());
     }
 }

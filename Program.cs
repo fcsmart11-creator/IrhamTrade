@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
@@ -8,13 +9,21 @@ using IrhamTrade.Server.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// ================= PORT & DATAPROTECTION =================
 var port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+
 try
 {
-    var keysPath = "/tmp/keys";
+    var keysPath = Path.Combine(Path.GetTempPath(), "irhamtrade-keys");
     Directory.CreateDirectory(keysPath);
     builder.Services.AddDataProtection()
        .PersistKeysToFileSystem(new DirectoryInfo(keysPath))
@@ -25,52 +34,63 @@ catch
     builder.Services.AddDataProtection().SetApplicationName("IrhamTrade");
 }
 
-// ================= DATABASE - POSTGRES OR SQLITE =================
 var postgresUrl = Environment.GetEnvironmentVariable("DATABASE_URL")
                ?? Environment.GetEnvironmentVariable("DATABASE_INTERNAL_URL");
-var connStr = builder.Configuration.GetConnectionString("DefaultConnection")
-           ?? "Data Source=/tmp/irhamtrade.db";
 
-if (!string.IsNullOrEmpty(postgresUrl))
+var defaultSqlite = builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=/tmp/irhamtrade.db";
+var connStr = defaultSqlite;
+
+if (!string.IsNullOrWhiteSpace(postgresUrl))
 {
     try
     {
-        var uri = new Uri(postgresUrl);
+        var url = postgresUrl.Trim();
+        if (url.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase))
+            url = "postgresql://" + url.Substring("postgres://".Length);
+
+        var uri = new Uri(url);
         var userInfo = uri.UserInfo.Split(':', 2);
-        // Handle password with special chars
+        var username = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "";
         var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
-        connStr = $"Host={uri.Host};Port={uri.Port};Database={uri.AbsolutePath.Trim('/')};Username={userInfo[0]};Password={password};SSL Mode=Require;Trust Server Certificate=true;";
+        var database = uri.AbsolutePath.Trim('/').Split('?')[0];
+        var host = uri.Host;
+        var portNum = uri.Port > 0 ? uri.Port : 5432;
+
+        connStr = $"Host={host};Port={portNum};Database={database};Username={username};Password={password};SSL Mode=Require;Trust Server Certificate=true;Pooling=true;Minimum Pool Size=1;Maximum Pool Size=20;Timeout=15;Command Timeout=30;";
     }
-    catch (Exception ex)
+    catch
     {
-        Console.WriteLine($"Failed to parse DATABASE_URL: {ex.Message}");
+        connStr = defaultSqlite;
     }
 }
 
-if (connStr.StartsWith("postgres", StringComparison.OrdinalIgnoreCase) || connStr.Contains("Host="))
+if (connStr.Contains("Host=", StringComparison.OrdinalIgnoreCase))
 {
     builder.Services.AddDbContext<AppDbContext>(options =>
     {
         options.UseNpgsql(connStr, npgsqlOptions =>
         {
             npgsqlOptions.EnableRetryOnFailure(5, TimeSpan.FromSeconds(10), null);
+            npgsqlOptions.CommandTimeout(30);
         });
+        options.EnableSensitiveDataLogging(false);
     });
 }
 else
 {
-    builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlite(connStr));
+    builder.Services.AddDbContext<AppDbContext>(options =>
+    {
+        options.UseSqlite(connStr);
+    });
 }
 
-// ================= SERVICES - LOGIN SECURED  =================
-builder.Services.AddSingleton<FirebaseService>(); 
-builder.Services.AddScoped<FirestoreService>();   
-builder.Services.AddScoped<AuthService>();        
+builder.Services.AddSingleton<FirebaseService>();
+builder.Services.AddScoped<FirestoreService>();
+builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<DashboardService>();
 builder.Services.AddHttpClient();
 builder.Services.AddMemoryCache();
 
-// ================= JWT - SECURED FOR LOGIN =================
 var jwtKey = builder.Configuration["Jwt:Key"]
    ?? builder.Configuration["Jwt__Key"]
    ?? Environment.GetEnvironmentVariable("Jwt__Key")
@@ -82,14 +102,13 @@ var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "IrhamTrade.App";
 
 if (jwtKey.Length < 32)
 {
-    Console.WriteLine("JWT Key too short - using fallback secure key");
     jwtKey = "IrhamTrade-Dev-Key-Only-Not-For-Prod-32-Chars-Min-2026!";
 }
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 .AddJwtBearer(options =>
 {
-    options.RequireHttpsMetadata = false; // Render is behind proxy
+    options.RequireHttpsMetadata = false;
     options.SaveToken = true;
     options.TokenValidationParameters = new TokenValidationParameters
     {
@@ -102,19 +121,6 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
         ClockSkew = TimeSpan.FromMinutes(2)
     };
-    options.Events = new JwtBearerEvents
-    {
-        OnAuthenticationFailed = context =>
-        {
-            Console.WriteLine($"JWT Auth failed: {context.Exception.Message}");
-            return Task.CompletedTask;
-        },
-        OnChallenge = context =>
-        {
-            Console.WriteLine($"JWT Challenge: {context.ErrorDescription}");
-            return Task.CompletedTask;
-        }
-    };
 });
 
 builder.Services.AddAuthorization();
@@ -122,6 +128,7 @@ builder.Services.AddControllers().AddJsonOptions(o =>
 {
     o.JsonSerializerOptions.PropertyNamingPolicy = null;
     o.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
+    o.JsonSerializerOptions.DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
 });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
@@ -133,35 +140,38 @@ builder.Services.AddHealthChecks();
 
 var app = builder.Build();
 
-// ================= MIDDLEWARE - ORDER MATTERS FOR LOGIN =================
-// Don't use generic exception handler for /api/Auth - let AuthController return proper messages
+app.UseForwardedHeaders();
+
 app.Use(async (context, next) =>
 {
-    // Bypass generic error handler for Auth routes to return real error messages
     if (context.Request.Path.StartsWithSegments("/api/Auth"))
     {
         await next();
         return;
     }
-    try { await next(); }
+    try
+    {
+        await next();
+    }
     catch (Exception ex)
     {
-        Console.WriteLine($"Unhandled exception for {context.Request.Path}: {ex.Message}");
+        var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+        logger.LogError(ex, "Unhandled exception for {Path}", context.Request.Path);
         if (!context.Response.HasStarted)
         {
             context.Response.StatusCode = 500;
             context.Response.ContentType = "application/json";
-            await context.Response.WriteAsJsonAsync(new { success = false, message = "Server is busy at the moment. Please try again in a few seconds", detail = ex.Message });
+            await context.Response.WriteAsJsonAsync(new { success = false, message = "Server is busy at the moment. Please try again in a few seconds" });
         }
     }
 });
 
 app.MapGet("/", () => Results.Ok(new { status = "IRHAM TRADE Server is LIVE on .NET 8", project = "irhamtrade-31ca6", framework = ".NET 8", time = DateTime.UtcNow }));
 app.MapHealthChecks("/health");
-app.MapGet("/health/detailed", (AppDbContext db, FirebaseService fb) =>
+app.MapGet("/health/detailed", async (AppDbContext db, FirebaseService fb, ILogger<Program> logger) =>
 {
     var dbOk = false;
-    try { dbOk = db.Database.CanConnect(); } catch { dbOk = false; }
+    try { dbOk = await db.Database.CanConnectAsync(); } catch (Exception ex) { logger.LogWarning(ex, "DB health check failed"); }
     return Results.Ok(new
     {
         status = "ok",
@@ -172,7 +182,6 @@ app.MapGet("/health/detailed", (AppDbContext db, FirebaseService fb) =>
         time = DateTime.UtcNow
     });
 });
-app.MapGet("/api/Auth/status", (FirebaseService fb) => Results.Ok(new { status = "Auth Ready", firebase = fb.IsInitialized ? "connected" : "sqlite-only", time = DateTime.UtcNow }));
 
 app.UseSwagger();
 app.UseSwaggerUI();
@@ -181,55 +190,52 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
-// ================= DATABASE INIT - LIKE FACEBOOK =================
 using (var scope = app.Services.CreateScope())
 {
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
     for (int attempt = 1; attempt <= 3; attempt++)
     {
         try
         {
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-
-            var hasMigrations = false;
-            try { hasMigrations = db.Database.GetMigrations().Any(); } catch { hasMigrations = false; }
-
-            if (!hasMigrations)
+            try
             {
-                var created = db.Database.EnsureCreated();
-                logger.LogInformation("Database ensured created: {Created} on .NET 8", created);
+                if (db.Database.IsNpgsql())
+                {
+                    await db.Database.MigrateAsync();
+                    logger.LogInformation("Postgres migrated successfully on .NET 8");
+                }
+                else
+                {
+                    await db.Database.EnsureCreatedAsync();
+                    logger.LogInformation("Sqlite ensured created on .NET 8");
+                }
             }
-            else
+            catch (Exception migrateEx)
             {
-                db.Database.Migrate();
-                logger.LogInformation("Database migrated successfully on .NET 8");
+                logger.LogWarning(migrateEx, "Migrate failed, trying EnsureCreated fallback attempt {Attempt}", attempt);
+                if (attempt == 1)
+                {
+                    try { await db.Database.EnsureCreatedAsync(); logger.LogInformation("Database fallback EnsureCreated succeeded"); break; } catch { }
+                }
+                throw;
             }
             break;
         }
         catch (Exception ex)
         {
-            var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
             logger.LogWarning(ex, "Database init attempt {Attempt} failed", attempt);
             if (attempt == 3)
             {
-                try
-                {
-                    var db2 = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                    db2.Database.EnsureCreated();
-                    logger.LogInformation("Database fallback EnsureCreated succeeded");
-                }
-                catch (Exception ex2)
-                {
-                    logger.LogError(ex2, "Database fallback failed - server will continue");
-                }
+                logger.LogError(ex, "Database init failed after 3 attempts - server will continue and retry on request");
             }
             else
             {
-                Thread.Sleep(1500);
+                await Task.Delay(1500 * attempt);
             }
         }
     }
 }
 
-app.Logger.LogInformation(" Server running on port {Port} Project irhamtrade-31ca6", port);
+app.Logger.LogInformation("Server running on port {Port} Project irhamtrade-31ca6", port);
 app.Run();

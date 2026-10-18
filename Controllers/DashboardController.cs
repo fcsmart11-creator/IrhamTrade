@@ -17,7 +17,7 @@ namespace IrhamTrade.Server.Controllers
             try
             {
                 var devices = await _svc.GetAllDevicesAsync();
-                return Ok(devices); // Now contains DateTime not Timestamp - JSON serializes fine
+                return Ok(devices);
             }
             catch (Exception ex) { _logger.LogError(ex, "GetAll Devices failed"); return Ok(new List<Dictionary<string, object>>()); }
         }
@@ -37,7 +37,7 @@ namespace IrhamTrade.Server.Controllers
                 if (data == null || data.Count == 0) return BadRequest(new { success = false, message = "Device data is required" });
                 var id = await _svc.CreateDeviceAsync(data);
                 if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to create device" });
-                return Ok(new { success = true, id, message = "Device created LIVE" });
+                return Ok(new { success = true, id, message = "Device created" });
             }
             catch (Exception ex) { _logger.LogError(ex, "Create Device failed"); return StatusCode(500, new { success = false, message = ex.Message }); }
         }
@@ -93,14 +93,13 @@ namespace IrhamTrade.Server.Controllers
             try
             {
                 if (data == null) return BadRequest(new { success = false, message = "Interest data is required" });
-                // BOSS FIX: Log what APK sends to debug businessId missing
                 if (!data.ContainsKey("businessId") && !data.ContainsKey("ownerId"))
                 {
                     _logger.LogWarning("Interest missing businessId! Data keys: {Keys}", string.Join(",", data.Keys));
                 }
                 var id = await _svc.CreateInterestAsync(data);
                 if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to submit interest" });
-                return Ok(new { success = true, id, message = "Interest submitted - Business will see on Order button" });
+                return Ok(new { success = true, id, message = "Interest submitted" });
             }
             catch (ArgumentException argEx) { return BadRequest(new { success = false, message = argEx.Message }); }
             catch (Exception ex) { _logger.LogError(ex, "Create interest failed"); return StatusCode(500, new { success = false, message = "Unable to submit interest" }); }
@@ -113,18 +112,29 @@ namespace IrhamTrade.Server.Controllers
         public async Task<IActionResult> GetByBusiness(string businessId) => Ok(await _svc.GetBusinessInterestsAsync(businessId));
 
         [HttpPut("{interestId}/status")]
-        public async Task<IActionResult> UpdateStatusPut(string interestId, [FromBody] Dictionary<string, string> body)
+        public async Task<IActionResult> UpdateStatusPut(string interestId, [FromBody] Dictionary<string, object> body)
         {
-            if (body == null || !body.TryGetValue("status", out var status)) return BadRequest(new { success = false, message = "Status is required" });
-            var ok = await _svc.UpdateInterestStatusAsync(interestId, status);
+            if (body == null) return BadRequest(new { success = false, message = "Status is required" });
+            var status = body.ContainsKey("status") ? body["status"]?.ToString() ?? "Pending" : "Pending";
+            var businessName = body.ContainsKey("businessName") ? body["businessName"]?.ToString() : null;
+            var businessResponse = body.ContainsKey("businessResponse") ? body["businessResponse"]?.ToString() : null;
+            if (string.IsNullOrEmpty(businessResponse) && body.ContainsKey("response")) businessResponse = body["response"]?.ToString();
+
+            var ok = await _svc.UpdateInterestStatusAsync(interestId, status, businessName, businessResponse);
             return ok ? Ok(new { success = true, message = $"Status updated to {status}" }) : NotFound(new { success = false, message = "Interest not found" });
         }
 
         [HttpPatch("{orderId}")]
-        public async Task<IActionResult> UpdateStatusPatch(string orderId, [FromBody] Dictionary<string, string> body)
+        public async Task<IActionResult> UpdateStatusPatch(string orderId, [FromBody] Dictionary<string, object> body)
         {
-            var status = body != null && body.ContainsKey("status") ? body["status"] : "Successful";
-            var ok = await _svc.UpdateInterestStatusAsync(orderId, status);
+            if (body == null) return BadRequest(new { success = false, message = "Body is required" });
+            var status = body.ContainsKey("status") ? body["status"]?.ToString() ?? "Successful" : "Successful";
+            var businessName = body.ContainsKey("businessName") ? body["businessName"]?.ToString() : null;
+            var businessResponse = body.ContainsKey("businessResponse") ? body["businessResponse"]?.ToString() : null;
+            if (string.IsNullOrEmpty(businessResponse) && body.ContainsKey("response")) businessResponse = body["response"]?.ToString();
+            if (string.IsNullOrEmpty(businessResponse) && body.ContainsKey("message")) businessResponse = body["message"]?.ToString();
+
+            var ok = await _svc.UpdateInterestStatusAsync(orderId, status, businessName, businessResponse);
             return ok ? Ok(new { success = true, message = $"Order {orderId} updated to {status}" }) : NotFound(new { success = false, message = "Order not found" });
         }
     }

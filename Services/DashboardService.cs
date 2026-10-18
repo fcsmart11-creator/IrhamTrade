@@ -45,7 +45,6 @@ namespace IrhamTrade.Server.Services
             return "";
         }
 
-        // BOSS FIX - CS0103 FIXED - No TSS, no nullable Timestamp? pattern
         private static object ConvertValue(object value)
         {
             if (value is Timestamp timestamp)
@@ -94,13 +93,12 @@ namespace IrhamTrade.Server.Services
                         snap = await _db.Collection("devices").Limit(200).GetSnapshotAsync();
                     }
                     var list = snap.Documents.Select(doc => SanitizeDoc(doc.ToDictionary(), doc.Id)).ToList();
-                    // Sort in memory by createdAt DateTime
                     list = list.OrderByDescending(d =>
                     {
                         if (d.TryGetValue("createdAt", out var v) && v is DateTime dt) return dt;
                         return DateTime.MinValue;
                     }).ToList();
-                    _logger.LogInformation("GetAllDevices LIVE count {Count}", list.Count);
+                    _logger.LogInformation("GetAllDevices count {Count}", list.Count);
                     return list;
                 }
                 catch (Exception ex)
@@ -207,7 +205,7 @@ namespace IrhamTrade.Server.Services
                 await _db.Collection("devices").Document(docId).SetAsync(firestoreData);
                 try { await _db.Collection("products").Document(docId).SetAsync(firestoreData, SetOptions.MergeAll); } catch { }
 
-                _logger.LogInformation("Device created LIVE {DeviceId} {Name} Business {BusinessId}", docId, name, businessId);
+                _logger.LogInformation("Device created {DeviceId} {Name} Business {BusinessId}", docId, name, businessId);
                 return docId;
             }, null!, "CreateDevice");
         }
@@ -281,12 +279,14 @@ namespace IrhamTrade.Server.Services
                 data["createdAt"] = Timestamp.GetCurrentTimestamp();
                 data["updatedAt"] = Timestamp.GetCurrentTimestamp();
                 if (!data.ContainsKey("status")) data["status"] = "Pending";
+                if (!data.ContainsKey("businessResponse")) data["businessResponse"] = "";
+                if (!data.ContainsKey("businessName")) data["businessName"] = GetString(data, "businessName");
                 if (!data.ContainsKey("date")) data["date"] = Timestamp.GetCurrentTimestamp();
 
                 var doc = await _db.Collection("interests").AddAsync(data);
                 try { await _db.Collection("orders").Document(doc.Id).SetAsync(data); } catch { }
 
-                _logger.LogInformation("Interest created LIVE {InterestId} Product {ProductId} Business {BusinessId} Buyer {BuyerName}", doc.Id, productId, businessId, buyerName);
+                _logger.LogInformation("Interest created {InterestId} Product {ProductId} Business {BusinessId} Buyer {BuyerName}", doc.Id, productId, businessId, buyerName);
                 return doc.Id;
             }, null!, "CreateInterest");
         }
@@ -317,6 +317,8 @@ namespace IrhamTrade.Server.Services
                     snap = await _db.Collection("interests").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
                 if (snap.Count == 0)
                     snap = await _db.Collection("orders").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                if (snap.Count == 0)
+                    snap = await _db.Collection("orders").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
 
                 var list = snap.Documents.Select(d => SanitizeInterest(d.ToDictionary(), d.Id)).ToList();
                 list = list.OrderByDescending(d =>
@@ -328,31 +330,65 @@ namespace IrhamTrade.Server.Services
             }, new List<Dictionary<string, object>>(), $"GetBusinessInterests {businessId}");
         }
 
-        public async Task<bool> UpdateInterestStatusAsync(string interestId, string status)
+        public async Task<bool> UpdateInterestStatusAsync(string interestId, string status, string? businessName = null, string? businessResponse = null)
         {
             if (string.IsNullOrWhiteSpace(interestId) || string.IsNullOrWhiteSpace(status)) return false;
             return await ExecuteWithRetryAsync(async () =>
             {
+                var updateData = new Dictionary<string, object>
+                {
+                    ["status"] = status,
+                    ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                };
+
+                if (!string.IsNullOrWhiteSpace(businessName))
+                {
+                    updateData["businessName"] = businessName;
+                }
+
+                if (!string.IsNullOrWhiteSpace(businessResponse))
+                {
+                    updateData["businessResponse"] = businessResponse;
+                    updateData["response"] = businessResponse;
+                    updateData["message"] = businessResponse;
+                }
+                else
+                {
+                    // Default professional messages
+                    if (status.Equals("Successful", StringComparison.OrdinalIgnoreCase))
+                    {
+                        updateData["businessResponse"] = "We will get in touch with you soon. Please wait for our call or WhatsApp message.";
+                    }
+                    else if (status.Equals("Failed", StringComparison.OrdinalIgnoreCase))
+                    {
+                        updateData["businessResponse"] = "Sorry, this product is no longer available. The business is currently busy.";
+                    }
+                }
+
                 var docRef = _db.Collection("interests").Document(interestId);
                 var snap = await docRef.GetSnapshotAsync();
                 if (snap.Exists)
                 {
-                    await docRef.SetAsync(new Dictionary<string, object> { ["status"] = status, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll);
-                    try { await _db.Collection("orders").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = status, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll); } catch { }
+                    await docRef.SetAsync(updateData, SetOptions.MergeAll);
+                    try { await _db.Collection("orders").Document(interestId).SetAsync(updateData, SetOptions.MergeAll); } catch { }
                     return true;
                 }
+
                 var q = await _db.Collection("interests").WhereEqualTo("orderId", interestId).Limit(1).GetSnapshotAsync();
                 if (q.Count > 0)
                 {
-                    await q.Documents[0].Reference.SetAsync(new Dictionary<string, object> { ["status"] = status, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll);
+                    await q.Documents[0].Reference.SetAsync(updateData, SetOptions.MergeAll);
                     return true;
                 }
+
                 var oq = await _db.Collection("orders").Document(interestId).GetSnapshotAsync();
                 if (oq.Exists)
                 {
-                    await oq.Reference.SetAsync(new Dictionary<string, object> { ["status"] = status, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll);
+                    await oq.Reference.SetAsync(updateData, SetOptions.MergeAll);
+                    try { await _db.Collection("interests").Document(interestId).SetAsync(updateData, SetOptions.MergeAll); } catch { }
                     return true;
                 }
+
                 return false;
             }, false, $"UpdateInterest {interestId}");
         }

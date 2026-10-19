@@ -63,16 +63,13 @@ public class FirestoreService
         {
             return await ExecuteWithRetryAsync(async () =>
             {
-                // BOSS FIX: Use ONLY FirebaseUid as docId - NEVER SQL Id "1" - ONE DOC ONLY!
                 var docId = user.FirebaseUid;
                 if (string.IsNullOrWhiteSpace(docId))
                 {
-                    // If FirebaseUid missing, don't create "1" - Use Guid, log warning
                     docId = Guid.NewGuid().ToString("N");
                     _logger.LogWarning("SaveUserToFirestore: FirebaseUid missing for {Email}, using Guid {DocId} instead of SQL Id {SqlId}", user.Email, docId, user.Id);
                 }
 
-                // Block bad IDs "1", "2", short - NEVER save them!
                 if (docId == "1" || docId == "2" || docId.Length < 10)
                 {
                     docId = Guid.NewGuid().ToString("N");
@@ -104,7 +101,6 @@ public class FirestoreService
                     { "updatedAt", Timestamp.GetCurrentTimestamp() }
                 };
 
-                // SAVE ONLY ONCE - IN USERS ONLY - NO DOUBLE!
                 await docRef.SetAsync(data, SetOptions.MergeAll);
                 _logger.LogInformation("User saved to Firestore ONE TIME: users/{DocId} Email: {Email} Role: {Role}", docId, user.Email, user.Role);
                 return true;
@@ -153,7 +149,6 @@ public class FirestoreService
                     { "updatedAt", Timestamp.GetCurrentTimestamp() }
                 };
 
-                // SAVE ONLY IN USERS - NOT IN BUYERS - ONE DOC ONLY!
                 await docRef.SetAsync(data, SetOptions.MergeAll);
                 _logger.LogInformation("Buyer saved to Firestore ONE TIME: users/{DocId} Email: {Email}", docId, user.Email);
                 return true;
@@ -171,7 +166,6 @@ public class FirestoreService
     {
         if (!_firebaseService.IsInitialized) return false;
 
-        // Block bad businessId
         if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2" || businessId.Length < 10)
         {
             _logger.LogWarning("SaveProduct blocked bad businessId {BusinessId} for product {Name}", businessId, name);
@@ -183,7 +177,6 @@ public class FirestoreService
             return await ExecuteWithRetryAsync(async () =>
             {
                 var docId = productId.ToString();
-                // SAVE ONLY IN DEVICES - NOT IN PRODUCTS - ONE DOC ONLY - Buyer reads devices!
                 var docRef = Firestore.Collection("devices").Document(docId);
 
                 var data = new Dictionary<string, object>
@@ -237,9 +230,7 @@ public class FirestoreService
         {
             return await ExecuteWithRetryAsync(async () =>
             {
-                // Delete only from devices - No products collection exists now!
                 await Firestore.Collection("devices").Document(productId.ToString()).DeleteAsync();
-                // Try delete from old products collection for cleanup if exists
                 try { await Firestore.Collection("products").Document(productId.ToString()).DeleteAsync(); } catch { }
                 return true;
             }, false, $"DeleteProduct {productId}");
@@ -270,7 +261,6 @@ public class FirestoreService
         {
             if (!int.TryParse(id, out var intId))
             {
-                // Try Firebase UID lookup
                 return await _dbContext.Users.FirstOrDefaultAsync(u => u.FirebaseUid == id);
             }
             return await _dbContext.Users.FirstOrDefaultAsync(u => u.Id == intId);

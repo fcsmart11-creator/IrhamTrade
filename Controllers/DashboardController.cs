@@ -23,7 +23,6 @@ namespace IrhamTrade.Server.Controllers
         {
             try
             {
-                // BOSS FIX: Block fake businessId "1","2" - 100% PERMANENT
                 if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2" || businessId.Length < 10)
                     return Ok(new List<Dictionary<string, object>>());
                 return Ok(await _svc.GetDevicesByBusinessAsync(businessId));
@@ -79,7 +78,7 @@ namespace IrhamTrade.Server.Controllers
         }
     }
 
-    // BOSS FIX: New controller for /api/dashboard/interests - fixes APK 404 timeout
+    // BOSS FIX: DashboardController - Now 100% bulletproof for BuyerHome 2 endpoints
     [ApiController]
     [Route("api/dashboard")]
     public class DashboardController : ControllerBase
@@ -93,13 +92,25 @@ namespace IrhamTrade.Server.Controllers
         {
             try
             {
+                _logger.LogInformation("BOSS /api/dashboard/interests HIT - Data count {Count}", data?.Count ?? 0);
                 if (data == null) return BadRequest(new { success = false, message = "Interest data required" });
+
                 var id = await _svc.CreateInterestAsync(data);
                 if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to submit interest" });
+
+                _logger.LogInformation("BOSS /api/dashboard/interests SUCCESS {Id}", id);
                 return Ok(new { success = true, id, message = "Interest submitted" });
             }
-            catch (ArgumentException argEx) { return BadRequest(new { success = false, message = argEx.Message }); }
-            catch (Exception ex) { _logger.LogError(ex, "Dashboard interests failed"); return StatusCode(500, new { success = false, message = ex.Message }); }
+            catch (ArgumentException argEx)
+            {
+                _logger.LogWarning("BOSS /api/dashboard/interests BadRequest: {Msg}", argEx.Message);
+                return BadRequest(new { success = false, message = argEx.Message });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "BOSS Dashboard interests failed - REAL ERROR");
+                return StatusCode(500, new { success = false, message = ex.Message });
+            }
         }
 
         [HttpGet("interests/business/{businessId}")]
@@ -144,6 +155,7 @@ namespace IrhamTrade.Server.Controllers
         {
             try
             {
+                _logger.LogInformation("BOSS /api/Interests HIT");
                 if (data == null) return BadRequest(new { success = false, message = "Interest data is required" });
                 var id = await _svc.CreateInterestAsync(data);
                 if (string.IsNullOrEmpty(id)) return StatusCode(500, new { success = false, message = "Unable to submit interest" });

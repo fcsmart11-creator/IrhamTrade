@@ -21,13 +21,21 @@ namespace IrhamTrade.Server.Controllers
         [HttpGet("business/{businessId}")]
         public async Task<IActionResult> GetByBusiness(string businessId)
         {
-            try { if (string.IsNullOrWhiteSpace(businessId)) return Ok(new List<Dictionary<string, object>>()); return Ok(await _svc.GetDevicesByBusinessAsync(businessId)); }
+            try
+            {
+                // BOSS FIX: Block fake businessId "1","2" - 100% PERMANENT
+                if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2" || businessId.Length < 10)
+                    return Ok(new List<Dictionary<string, object>>());
+                return Ok(await _svc.GetDevicesByBusinessAsync(businessId));
+            }
             catch (Exception ex) { _logger.LogError(ex, "GetByBusiness failed {BusinessId}", businessId); return Ok(new List<Dictionary<string, object>>()); }
         }
 
         [HttpGet("count/{businessId}")]
         public async Task<IActionResult> GetCount(string businessId)
         {
+            if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2")
+                return Ok(new { businessId, count = 0, limit = 20, canPublish = true });
             var count = await _svc.GetBusinessDeviceCountAsync(businessId);
             return Ok(new { businessId, count, limit = 20, canPublish = count < 20 });
         }
@@ -95,7 +103,12 @@ namespace IrhamTrade.Server.Controllers
         }
 
         [HttpGet("interests/business/{businessId}")]
-        public async Task<IActionResult> GetBusiness(string businessId) => Ok(await _svc.GetBusinessInterestsAsync(businessId));
+        public async Task<IActionResult> GetBusiness(string businessId)
+        {
+            if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2" || businessId.Length < 10)
+                return Ok(new List<Dictionary<string, object>>());
+            return Ok(await _svc.GetBusinessInterestsAsync(businessId));
+        }
 
         [HttpGet("interests/buyer/{buyerId}")]
         public async Task<IActionResult> GetBuyer(string buyerId) => Ok(await _svc.GetBuyerInterestsAsync(buyerId));
@@ -114,7 +127,12 @@ namespace IrhamTrade.Server.Controllers
         {
             try
             {
-                if (!string.IsNullOrEmpty(businessId)) return Ok(await _svc.GetBusinessInterestsAsync(businessId));
+                if (!string.IsNullOrEmpty(businessId))
+                {
+                    if (businessId == "1" || businessId == "2" || businessId.Length < 10)
+                        return Ok(new List<Dictionary<string, object>>());
+                    return Ok(await _svc.GetBusinessInterestsAsync(businessId));
+                }
                 if (!string.IsNullOrEmpty(buyerId)) return Ok(await _svc.GetBuyerInterestsAsync(buyerId));
                 return BadRequest(new { success = false, message = "Business ID or Buyer ID is required" });
             }
@@ -139,7 +157,12 @@ namespace IrhamTrade.Server.Controllers
         public async Task<IActionResult> GetByBuyer(string buyerId) => Ok(await _svc.GetBuyerInterestsAsync(buyerId));
 
         [HttpGet("business/{businessId}")]
-        public async Task<IActionResult> GetByBusiness(string businessId) => Ok(await _svc.GetBusinessInterestsAsync(businessId));
+        public async Task<IActionResult> GetByBusiness(string businessId)
+        {
+            if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2" || businessId.Length < 10)
+                return Ok(new List<Dictionary<string, object>>());
+            return Ok(await _svc.GetBusinessInterestsAsync(businessId));
+        }
 
         [HttpDelete("{interestId}")]
         public async Task<IActionResult> Delete(string interestId)
@@ -200,7 +223,12 @@ namespace IrhamTrade.Server.Controllers
         [HttpGet("business/{businessId}")]
         public async Task<IActionResult> GetByBusiness(string businessId)
         {
-            try { return Ok(await _svc.GetTransactionsByBusinessAsync(businessId)); }
+            try
+            {
+                if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2" || businessId.Length < 10)
+                    return Ok(new List<Dictionary<string, object>>());
+                return Ok(await _svc.GetTransactionsByBusinessAsync(businessId));
+            }
             catch (Exception ex) { _logger.LogError(ex, "Get transactions failed {BusinessId}", businessId); return Ok(new List<Dictionary<string, object>>()); }
         }
 

@@ -58,11 +58,7 @@ namespace IrhamTrade.Server.Services
         private static Dictionary<string, object> SanitizeDoc(Dictionary<string, object> data, string docId)
         {
             var clean = new Dictionary<string, object>();
-            try
-            {
-                foreach (var kv in data) clean[kv.Key] = ConvertValue(kv.Value);
-            }
-            catch { }
+            try { foreach (var kv in data) clean[kv.Key] = ConvertValue(kv.Value); } catch { }
             clean["id"] = docId;
             clean["deviceId"] = docId;
             clean["productId"] = docId;
@@ -80,8 +76,6 @@ namespace IrhamTrade.Server.Services
             clean["id"] = docId;
             clean["interestId"] = docId;
             clean["orderId"] = docId;
-
-            // BOSS FIX: Ensure productName always exists - like APK FirestoreService expects
             if (!clean.ContainsKey("productName") || string.IsNullOrWhiteSpace(clean["productName"]?.ToString()))
             {
                 var name = GetString(clean, "name");
@@ -89,19 +83,15 @@ namespace IrhamTrade.Server.Services
                 else if (clean.TryGetValue("model", out var m) && !string.IsNullOrWhiteSpace(m?.ToString())) clean["productName"] = m;
             }
             if (!clean.ContainsKey("name") && clean.TryGetValue("productName", out var pn)) clean["name"] = pn;
-
-            // BOSS FIX: Image - keep small reference, don't crash Firestore - APK will fetch image from device doc if needed
             var img = GetString(clean, "productImage");
             if (string.IsNullOrWhiteSpace(img)) img = GetString(clean, "imageBase64");
             if (string.IsNullOrWhiteSpace(img)) img = GetString(clean, "image");
             if (string.IsNullOrWhiteSpace(img)) img = GetString(clean, "imageUrl");
             if (!string.IsNullOrWhiteSpace(img))
             {
-                // If image huge, keep flag but don't store huge string in interest
                 if (img.Length > 300000) { clean["hasImage"] = true; clean["productImage"] = ""; clean["imageBase64"] = ""; }
                 else { clean["productImage"] = img; clean["imageBase64"] = img; clean["imageUrl"] = img; }
             }
-
             if (!clean.ContainsKey("price") && clean.TryGetValue("productPrice", out var pp)) clean["price"] = pp;
             if (!clean.ContainsKey("productPrice") && clean.TryGetValue("price", out var p)) clean["productPrice"] = p;
             if (!clean.ContainsKey("buyerName"))
@@ -157,7 +147,7 @@ namespace IrhamTrade.Server.Services
 
         public async Task<List<Dictionary<string, object>>> GetDevicesByBusinessAsync(string businessId)
         {
-            if (string.IsNullOrWhiteSpace(businessId)) return new List<Dictionary<string, object>>();
+            if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2") return new List<Dictionary<string, object>>();
             return await ExecuteWithRetryAsync(async () =>
             {
                 var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
@@ -286,7 +276,7 @@ namespace IrhamTrade.Server.Services
             if (data == null) throw new ArgumentNullException(nameof(data));
             return await ExecuteWithRetryAsync(async () =>
             {
-                // BOSS FIX 1: Trim huge image BEFORE any Firestore write - prevents 1MB limit crash - main cause of "check internet"
+                // BOSS FIX 1: Trim huge image BEFORE any Firestore write
                 try
                 {
                     var keys = new[] { "productImage", "imageBase64", "image", "imageUrl" };
@@ -294,7 +284,7 @@ namespace IrhamTrade.Server.Services
                     {
                         if (data.TryGetValue(k, out var v) && v != null && v.ToString()!.Length > 250000)
                         {
-                            data[k] = ""; // Don't store huge base64 in interest - device doc already has it
+                            data[k] = "";
                         }
                     }
                     data["hasImage"] = true;
@@ -303,6 +293,11 @@ namespace IrhamTrade.Server.Services
 
                 var businessId = GetString(data, "businessId");
                 if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "ownerId");
+
+                // BOSS FIX 2: PERMANENT BLOCK FAKE businessId - AFTER businessId defined - 100% BUILD OK
+                bool IsBadId(string? id) => string.IsNullOrWhiteSpace(id) || id == "1" || id == "2" || id.Length < 10;
+                if (IsBadId(businessId)) throw new ArgumentException($"Invalid businessId blocked: {businessId}");
+
                 var productId = GetString(data, "productId");
                 if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "deviceId");
                 var buyerId = GetString(data, "buyerId");
@@ -310,10 +305,8 @@ namespace IrhamTrade.Server.Services
                 var buyerName = GetString(data, "buyerName");
                 if (string.IsNullOrWhiteSpace(buyerName)) buyerName = GetString(data, "fullName");
                 if (string.IsNullOrWhiteSpace(buyerName)) buyerName = GetString(data, "name");
-                if (string.IsNullOrWhiteSpace(businessId)) throw new ArgumentException("businessId is required for Order");
                 if (string.IsNullOrWhiteSpace(productId)) throw new ArgumentException("productId is required");
 
-                // BOSS FIX 2: Enrich missing productName/price/brand from device doc - like APK FirestoreService does - so buyer order always has details
                 try
                 {
                     if (string.IsNullOrWhiteSpace(GetString(data, "productName")) || string.IsNullOrWhiteSpace(GetString(data, "price")))
@@ -334,7 +327,6 @@ namespace IrhamTrade.Server.Services
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "Failed to fetch device {ProductId} for interest enrichment", productId); }
 
-                // Normalize fields - same as APK FirestoreService expects
                 data["businessId"] = businessId;
                 data["ownerId"] = businessId;
                 data["productId"] = productId;
@@ -385,7 +377,7 @@ namespace IrhamTrade.Server.Services
 
         public async Task<List<Dictionary<string, object>>> GetBusinessInterestsAsync(string businessId)
         {
-            if (string.IsNullOrWhiteSpace(businessId)) return new();
+            if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2") return new();
             return await ExecuteWithRetryAsync(async () =>
             {
                 var all = new List<Dictionary<string, object>>();
@@ -560,7 +552,7 @@ namespace IrhamTrade.Server.Services
 
         public async Task<List<Dictionary<string, object>>> GetTransactionsByBusinessAsync(string businessId)
         {
-            if (string.IsNullOrWhiteSpace(businessId)) return new();
+            if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2") return new();
             return await ExecuteWithRetryAsync(async () =>
             {
                 var snap = await _db.Collection("transactions").WhereEqualTo("businessId", businessId).GetSnapshotAsync();

@@ -54,6 +54,7 @@ public class FirestoreService
         return fallback;
     }
 
+    // ========== BOSS FIX 100% - ONLY USERS COLLECTION - ONLY REAL FIREBASE UID - NO DOUBLE ==========
     public async Task<bool> SaveUserToFirestoreAsync(User user)
     {
         if (!_firebaseService.IsInitialized) return false;
@@ -62,40 +63,50 @@ public class FirestoreService
         {
             return await ExecuteWithRetryAsync(async () =>
             {
-                // Save by SQLite ID AND by Firebase UID for unified lookup - Like Facebook
-                var docRefById = Firestore.Collection("users").Document(user.Id.ToString());
-                DocumentReference? docRefByUid = null;
-                if (!string.IsNullOrWhiteSpace(user.FirebaseUid))
-                    docRefByUid = Firestore.Collection("users").Document(user.FirebaseUid);
+                // BOSS FIX: Use ONLY FirebaseUid as docId - NEVER SQL Id "1" - ONE DOC ONLY!
+                var docId = user.FirebaseUid;
+                if (string.IsNullOrWhiteSpace(docId))
+                {
+                    // If FirebaseUid missing, don't create "1" - Use Guid, log warning
+                    docId = Guid.NewGuid().ToString("N");
+                    _logger.LogWarning("SaveUserToFirestore: FirebaseUid missing for {Email}, using Guid {DocId} instead of SQL Id {SqlId}", user.Email, docId, user.Id);
+                }
+
+                // Block bad IDs "1", "2", short - NEVER save them!
+                if (docId == "1" || docId == "2" || docId.Length < 10)
+                {
+                    docId = Guid.NewGuid().ToString("N");
+                    _logger.LogWarning("SaveUserToFirestore: Blocked bad docId, using Guid {DocId}", docId);
+                }
+
+                var docRef = Firestore.Collection("users").Document(docId);
 
                 var data = new Dictionary<string, object>
                 {
-                    { "id", user.Id },
-                    { "idString", user.Id.ToString() },
-                    { "businessId", user.Id.ToString() },
-                    { "ownerId", user.Id.ToString() },
-                    { "buyerId", user.Id.ToString() },
-                    { "userId", user.Id.ToString() },
-                    { "email", user.Email },
-                    { "role", user.Role?? "business" },
-                    { "businessName", user.BusinessName?? "" },
-                    { "fullName", user.FullName?? user.BusinessName?? "" },
-                    { "phone", user.Phone?? "" },
-                    { "location", user.Location?? "" },
-                    { "firebaseUid", user.FirebaseUid?? "" },
-                    { "firebase_uid", user.FirebaseUid?? "" },
+                    { "id", docId },
+                    { "idString", docId },
+                    { "businessId", docId },
+                    { "ownerId", docId },
+                    { "buyerId", docId },
+                    { "userId", docId },
+                    { "firebaseUid", user.FirebaseUid ?? docId },
+                    { "firebase_uid", user.FirebaseUid ?? docId },
+                    { "email", user.Email ?? "" },
+                    { "role", user.Role ?? "business" },
+                    { "businessName", user.BusinessName ?? "" },
+                    { "fullName", !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.BusinessName ?? "" },
+                    { "phone", user.Phone ?? "" },
+                    { "location", user.Location ?? "" },
                     { "createdAt", Timestamp.FromDateTime(DateTime.SpecifyKind(user.CreatedAt, DateTimeKind.Utc)) },
-                    { "lastLoginAt", user.LastLoginAt!= null? Timestamp.FromDateTime(DateTime.SpecifyKind(user.LastLoginAt.Value, DateTimeKind.Utc)) : Timestamp.GetCurrentTimestamp() },
+                    { "lastLoginAt", user.LastLoginAt != null ? Timestamp.FromDateTime(DateTime.SpecifyKind(user.LastLoginAt.Value, DateTimeKind.Utc)) : Timestamp.GetCurrentTimestamp() },
                     { "isVerified", true },
                     { "isActive", true },
                     { "updatedAt", Timestamp.GetCurrentTimestamp() }
                 };
 
-                await docRefById.SetAsync(data, SetOptions.MergeAll);
-                if (docRefByUid != null && docRefByUid.Id != docRefById.Id)
-                    await docRefByUid.SetAsync(data, SetOptions.MergeAll);
-
-                _logger.LogInformation("User saved to Firestore: {Email} Role: {Role} ID: {Id} UID: {Uid}", user.Email, user.Role, user.Id, user.FirebaseUid);
+                // SAVE ONLY ONCE - IN USERS ONLY - NO DOUBLE!
+                await docRef.SetAsync(data, SetOptions.MergeAll);
+                _logger.LogInformation("User saved to Firestore ONE TIME: users/{DocId} Email: {Email} Role: {Role}", docId, user.Email, user.Role);
                 return true;
             }, false, $"SaveUser {user.Email}");
         }
@@ -106,6 +117,7 @@ public class FirestoreService
         }
     }
 
+    // ========== BOSS FIX - BUYER ALSO ONLY USERS - NO BUYERS COLLECTION - NO DOUBLE ==========
     public async Task<bool> SaveBuyerProfileAsync(User user)
     {
         if (!_firebaseService.IsInitialized) return false;
@@ -113,32 +125,37 @@ public class FirestoreService
         {
             return await ExecuteWithRetryAsync(async () =>
             {
-                var docRef = Firestore.Collection("buyers").Document(user.Id.ToString());
-                var userRef = Firestore.Collection("users").Document(user.Id.ToString());
-                DocumentReference? userRefByUid = null;
-                if (!string.IsNullOrWhiteSpace(user.FirebaseUid))
-                    userRefByUid = Firestore.Collection("users").Document(user.FirebaseUid);
+                var docId = user.FirebaseUid;
+                if (string.IsNullOrWhiteSpace(docId))
+                    docId = Guid.NewGuid().ToString("N");
+
+                if (docId == "1" || docId == "2" || docId.Length < 10)
+                    docId = Guid.NewGuid().ToString("N");
+
+                var docRef = Firestore.Collection("users").Document(docId);
 
                 var data = new Dictionary<string, object>
                 {
-                    { "id", user.Id },
-                    { "idString", user.Id.ToString() },
-                    { "buyerId", user.Id.ToString() },
-                    { "userId", user.Id.ToString() },
-                    { "email", user.Email },
-                    { "fullName", user.FullName?? "" },
-                    { "name", user.FullName?? "" },
-                    { "phone", user.Phone?? "" },
-                    { "location", user.Location?? "" },
+                    { "id", docId },
+                    { "idString", docId },
+                    { "buyerId", docId },
+                    { "userId", docId },
+                    { "businessId", docId },
+                    { "ownerId", docId },
+                    { "email", user.Email ?? "" },
+                    { "fullName", user.FullName ?? "" },
+                    { "name", user.FullName ?? "" },
+                    { "phone", user.Phone ?? "" },
+                    { "location", user.Location ?? "" },
                     { "role", "buyer" },
-                    { "firebaseUid", user.FirebaseUid?? "" },
+                    { "firebaseUid", user.FirebaseUid ?? docId },
                     { "createdAt", Timestamp.FromDateTime(DateTime.SpecifyKind(user.CreatedAt, DateTimeKind.Utc)) },
                     { "updatedAt", Timestamp.GetCurrentTimestamp() }
                 };
+
+                // SAVE ONLY IN USERS - NOT IN BUYERS - ONE DOC ONLY!
                 await docRef.SetAsync(data, SetOptions.MergeAll);
-                await userRef.SetAsync(data, SetOptions.MergeAll);
-                if (userRefByUid != null && userRefByUid.Id != userRef.Id)
-                    await userRefByUid.SetAsync(data, SetOptions.MergeAll);
+                _logger.LogInformation("Buyer saved to Firestore ONE TIME: users/{DocId} Email: {Email}", docId, user.Email);
                 return true;
             }, false, $"SaveBuyer {user.Email}");
         }
@@ -149,45 +166,49 @@ public class FirestoreService
         }
     }
 
-    // =========================================================
-    // BOSS FIX - PRODUCTS - CRITICAL FOR BUYER TO SEE LIVE
-    // Saves to BOTH products + devices collections like Facebook dual-write
-    // =========================================================
+    // ========== BOSS FIX - PRODUCTS - ONLY DEVICES COLLECTION - NO PRODUCTS COLLECTION - NO DOUBLE ==========
     public async Task<bool> SaveProductToFirestoreAsync(int productId, string businessId, string businessName, string name, string category, double price, string description, string imageUrl, string location)
     {
         if (!_firebaseService.IsInitialized) return false;
+
+        // Block bad businessId
+        if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2" || businessId.Length < 10)
+        {
+            _logger.LogWarning("SaveProduct blocked bad businessId {BusinessId} for product {Name}", businessId, name);
+            return false;
+        }
+
         try
         {
             return await ExecuteWithRetryAsync(async () =>
             {
-                // Document in products collection (for Server)
-                var docRefProducts = Firestore.Collection("products").Document(productId.ToString());
-                // Document in devices collection (for APK - what buyer reads)
-                var docRefDevices = Firestore.Collection("devices").Document(productId.ToString());
+                var docId = productId.ToString();
+                // SAVE ONLY IN DEVICES - NOT IN PRODUCTS - ONE DOC ONLY - Buyer reads devices!
+                var docRef = Firestore.Collection("devices").Document(docId);
 
                 var data = new Dictionary<string, object>
                 {
                     { "id", productId },
-                    { "idString", productId.ToString() },
-                    { "productId", productId.ToString() },
-                    { "deviceId", productId.ToString() },
+                    { "idString", docId },
+                    { "productId", docId },
+                    { "deviceId", docId },
                     { "businessId", businessId },
                     { "ownerId", businessId },
                     { "userId", businessId },
-                    { "businessName", businessName?? "" },
+                    { "businessName", businessName ?? "" },
                     { "name", name },
                     { "productName", name },
                     { "title", name },
                     { "model", name },
-                    { "brand", category?? "General" },
-                    { "category", category?? "General" },
+                    { "brand", category ?? "General" },
+                    { "category", category ?? "General" },
                     { "price", price },
                     { "productPrice", price },
-                    { "description", description?? "" },
-                    { "imageUrl", imageUrl?? "" },
-                    { "image", imageUrl?? "" },
-                    { "imageBase64", imageUrl?? "" },
-                    { "location", location?? "" },
+                    { "description", description ?? "" },
+                    { "imageUrl", imageUrl ?? "" },
+                    { "image", imageUrl ?? "" },
+                    { "imageBase64", imageUrl ?? "" },
+                    { "location", location ?? "" },
                     { "contactNumber", "" },
                     { "isAvailable", true },
                     { "isActive", true },
@@ -197,11 +218,8 @@ public class FirestoreService
                     { "updatedAt", Timestamp.GetCurrentTimestamp() }
                 };
 
-                // Dual write - ensures buyer sees it LIVE whether they query products or devices
-                await docRefProducts.SetAsync(data, SetOptions.MergeAll);
-                await docRefDevices.SetAsync(data, SetOptions.MergeAll);
-
-                _logger.LogInformation("Product saved LIVE to Firestore (products+devices): {Name} Business: {Biz} ID: {Id}", name, businessName, productId);
+                await docRef.SetAsync(data, SetOptions.MergeAll);
+                _logger.LogInformation("Product saved LIVE to Firestore ONE TIME: devices/{Id} Business: {Biz} RealId: {RealId}", docId, businessName, businessId);
                 return true;
             }, false, $"SaveProduct {name}");
         }
@@ -219,8 +237,10 @@ public class FirestoreService
         {
             return await ExecuteWithRetryAsync(async () =>
             {
-                await Firestore.Collection("products").Document(productId.ToString()).DeleteAsync();
-                try { await Firestore.Collection("devices").Document(productId.ToString()).DeleteAsync(); } catch { }
+                // Delete only from devices - No products collection exists now!
+                await Firestore.Collection("devices").Document(productId.ToString()).DeleteAsync();
+                // Try delete from old products collection for cleanup if exists
+                try { await Firestore.Collection("products").Document(productId.ToString()).DeleteAsync(); } catch { }
                 return true;
             }, false, $"DeleteProduct {productId}");
         }

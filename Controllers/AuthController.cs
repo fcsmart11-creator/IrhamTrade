@@ -3,6 +3,7 @@ using IrhamTrade.Server.Services;
 
 namespace IrhamTrade.Server.Controllers
 {
+    // Purpose: Auth Controller - Handles register-business, register-buyer, login, forgot-password, reset-password, logout, validate. Returns real FirebaseUid + real name always, like Facebook/TikTok. Never returns fake ID "1".
     [ApiController]
     [Route("api/[controller]")]
     public class AuthController : ControllerBase
@@ -16,12 +17,14 @@ namespace IrhamTrade.Server.Controllers
             _logger = logger;
         }
 
+        // Purpose: Status check - verifies auth service running, project irhamtrade-31ca6.
         [HttpGet]
         public IActionResult Status()
         {
             return Ok(new { message = "IrhamTrade Auth service running", project = "irhamtrade-31ca6", ready = true, time = DateTime.UtcNow });
         }
 
+        // Purpose: Register business - validates businessName/email/password, calls AuthService.RegisterBusinessAsync which creates Firebase user + Firestore users/{realId} + SQLite. Returns full profile with real ID, role, businessName, phone, location, token. Never returns "1".
         [HttpPost("register-business")]
         public async Task<IActionResult> RegisterBusiness([FromBody] RegisterBusinessRequest req)
         {
@@ -39,7 +42,6 @@ namespace IrhamTrade.Server.Controllers
                     return BadRequest(new { success = false, message = result.Message });
                 }
 
-                // BOSS FIX: Added phone, location, businessName, fullName variants - like Facebook returns full profile
                 return Ok(new
                 {
                     success = true,
@@ -49,16 +51,23 @@ namespace IrhamTrade.Server.Controllers
                     business_name = result.User.BusinessName,
                     businessName = result.User.BusinessName,
                     fullName = result.User.FullName,
-                    name = result.User.BusinessName,
+                    full_name = result.User.FullName,
+                    name = !string.IsNullOrWhiteSpace(result.User.BusinessName) ? result.User.BusinessName : result.User.FullName,
                     phone = result.User.Phone,
                     location = result.User.Location,
                     user_email = result.User.Email,
                     email = result.User.Email,
                     user_id = result.User.Id,
                     userId = result.User.Id,
+                    firebaseUid = result.User.Id,
+                    firebase_uid = result.User.Id,
+                    id = result.User.Id,
+                    idString = result.User.Id,
+                    businessId = result.User.Id,
+                    ownerId = result.User.Id,
                     user = result.User,
                     token = result.User.Token,
-                    id = result.User.Id
+                    idToken = result.User.Token
                 });
             }
             catch (Exception ex)
@@ -68,6 +77,7 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
+        // Purpose: Register buyer - validates fullName/email/password, creates buyer account with real FirebaseUid.
         [HttpPost("register-buyer")]
         public async Task<IActionResult> RegisterBuyer([FromBody] RegisterBuyerRequest req)
         {
@@ -85,7 +95,6 @@ namespace IrhamTrade.Server.Controllers
                     return BadRequest(new { success = false, message = result.Message });
                 }
 
-                // BOSS FIX: Added phone, location
                 return Ok(new
                 {
                     success = true,
@@ -94,7 +103,9 @@ namespace IrhamTrade.Server.Controllers
                     role = result.User.Role,
                     buyer_name = result.User.FullName,
                     fullName = result.User.FullName,
+                    full_name = result.User.FullName,
                     businessName = result.User.BusinessName,
+                    business_name = result.User.BusinessName,
                     name = result.User.FullName,
                     phone = result.User.Phone,
                     location = result.User.Location,
@@ -102,9 +113,14 @@ namespace IrhamTrade.Server.Controllers
                     email = result.User.Email,
                     user_id = result.User.Id,
                     userId = result.User.Id,
+                    firebaseUid = result.User.Id,
+                    firebase_uid = result.User.Id,
+                    id = result.User.Id,
+                    idString = result.User.Id,
+                    buyerId = result.User.Id,
                     user = result.User,
                     token = result.User.Token,
-                    id = result.User.Id
+                    idToken = result.User.Token
                 });
             }
             catch (Exception ex)
@@ -114,6 +130,7 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
+        // Purpose: Login - MAIN SECURITY LOGIC like Facebook. Email+password only, returns SAME account with SAME role, SAME real ID, SAME real name, phone, location. No new account created. Validates against SQLite then Firebase fallback to restore real name/ID even if Firestore cleared.
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] LoginRequest req)
         {
@@ -125,13 +142,18 @@ namespace IrhamTrade.Server.Controllers
                 _logger.LogInformation("Login attempt: {Email}", req.Email);
                 var result = await _authService.LoginAsync(req.Email, req.Password);
 
-                if (!result.Success)
+                if (!result.Success || result.User == null)
                 {
                     _logger.LogWarning("Login failed {Email}: {Message}", req.Email, result.Message);
                     return Unauthorized(new { success = false, message = result.Message });
                 }
 
-                // BOSS FIX: MAIN LOGIC - Like Facebook - Return SAME account with role, name, phone, location - NO new account
+                if (result.User.Id == "1" || result.User.Id == "2" || result.User.Id.Length < 10)
+                {
+                    _logger.LogError("Login returned bad ID {Id} for {Email} - SECURITY BLOCK - Should never happen with fixed AuthService", result.User.Id, req.Email);
+                    return StatusCode(500, new { success = false, message = "Server returned invalid ID. Please contact support - fixed server will give real ID." });
+                }
+
                 return Ok(new
                 {
                     success = true,
@@ -143,16 +165,25 @@ namespace IrhamTrade.Server.Controllers
                     businessName = result.User.BusinessName,
                     buyer_name = result.User.FullName,
                     fullName = result.User.FullName,
-                    name = string.IsNullOrWhiteSpace(result.User.BusinessName) ? result.User.FullName : result.User.BusinessName,
+                    full_name = result.User.FullName,
+                    name = !string.IsNullOrWhiteSpace(result.User.BusinessName) ? result.User.BusinessName : result.User.FullName,
+                    displayName = !string.IsNullOrWhiteSpace(result.User.BusinessName) ? result.User.BusinessName : result.User.FullName,
                     phone = result.User.Phone,
                     location = result.User.Location,
                     user_email = result.User.Email,
                     email = result.User.Email,
                     user_id = result.User.Id,
                     userId = result.User.Id,
+                    firebaseUid = result.User.Id,
+                    firebase_uid = result.User.Id,
+                    id = result.User.Id,
+                    idString = result.User.Id,
+                    businessId = result.User.Id,
+                    ownerId = result.User.Id,
+                    buyerId = result.User.Id,
                     user = result.User,
                     token = result.User.Token,
-                    id = result.User.Id
+                    idToken = result.User.Token
                 });
             }
             catch (Exception ex)
@@ -162,9 +193,7 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        // =========================================================
-        // REAL FORGOT PASSWORD - LIKE FACEBOOK / TIKTOK BACKEND
-        // =========================================================
+        // Purpose: Forgot password - validates email, calls AuthService.ForgotPasswordAsync. Returns success message. Security: returns success even if email not found to avoid enumeration (like Facebook).
         [HttpPost("forgot-password")]
         public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest req)
         {
@@ -179,7 +208,6 @@ namespace IrhamTrade.Server.Controllers
                 if (!result.Success)
                     return BadRequest(new { success = false, message = result.Message });
 
-                // Always return success even if email not found - security best practice like Facebook
                 return Ok(new { success = true, message = result.Message, email = req.Email.Trim().ToLowerInvariant() });
             }
             catch (Exception ex)
@@ -189,6 +217,7 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
+        // Purpose: Reset password - validates email and new password length, updates SQLite and Firebase Auth.
         [HttpPost("reset-password")]
         public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest req)
         {
@@ -212,10 +241,7 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        // =========================================================
-        // REAL LOGOUT - INVALIDATES TOKEN LIKE FACEBOOK
-        // So 1 phone can switch roles clean
-        // =========================================================
+        // Purpose: Logout - invalidates JWT token by blacklisting, allows one phone to switch roles cleanly (business -> buyer). Always returns success like Facebook.
         [HttpPost("logout")]
         public async Task<IActionResult> Logout()
         {
@@ -230,10 +256,11 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Logout error");
-                return Ok(new { success = true, message = "Logged out" }); // Always succeed logout like Facebook
+                return Ok(new { success = true, message = "Logged out" });
             }
         }
 
+        // Purpose: Validate token - checks if JWT is blacklisted or expired.
         [HttpGet("validate")]
         public async Task<IActionResult> ValidateToken()
         {

@@ -28,6 +28,7 @@ public class FirestoreService
         }
     }
 
+    // Purpose: Execute with retry and timeout - prevents server crash if Firestore slow. Returns fallback on failure. Facebook standard: Never throw 500.
     private async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, T fallback, string operationName, int retries = 3)
     {
         for (int attempt = 1; attempt <= retries; attempt++)
@@ -54,6 +55,7 @@ public class FirestoreService
         return fallback;
     }
 
+    // Purpose: Save business user to Firestore users collection. Generates valid docId if FirebaseUid bad (1,2,<10). MergeAll to avoid overwrite.
     public async Task<bool> SaveUserToFirestoreAsync(User user)
     {
         if (!_firebaseService.IsInitialized) return false;
@@ -95,6 +97,7 @@ public class FirestoreService
         catch (Exception ex) { _logger.LogError(ex, "Failed to save user to Firestore: {Email}", user.Email); return false; }
     }
 
+    // Purpose: Save buyer profile to users collection with role buyer.
     public async Task<bool> SaveBuyerProfileAsync(User user)
     {
         if (!_firebaseService.IsInitialized) return false;
@@ -131,6 +134,7 @@ public class FirestoreService
         catch (Exception ex) { _logger.LogError(ex, "Failed to save buyer: {Email}", user.Email); return false; }
     }
 
+    // Purpose: Save product to Firestore devices collection. Validates businessId, rejects bad IDs. Sets isAvailable true, isReserved false, isSold false for marketplace LIVE.
     public async Task<bool> SaveProductToFirestoreAsync(int productId, string businessId, string businessName, string name, string category, double price, string description, string imageUrl, string location)
     {
         if (!_firebaseService.IsInitialized) return false;
@@ -166,6 +170,8 @@ public class FirestoreService
                     { "location", location ?? "" },
                     { "contactNumber", "" },
                     { "isAvailable", true },
+                    { "isReserved", false },
+                    { "isSold", false },
                     { "isActive", true },
                     { "status", "active" },
                     { "stock", 100 },
@@ -179,6 +185,7 @@ public class FirestoreService
         catch (Exception ex) { _logger.LogError(ex, "Failed to save product: {Name}", name); return false; }
     }
 
+    // Purpose: Delete product from devices and products collections. Used for SOLD forever flow.
     public async Task<bool> DeleteProductFromFirestoreAsync(int productId)
     {
         if (!_firebaseService.IsInitialized) return false;
@@ -194,12 +201,14 @@ public class FirestoreService
         catch (Exception ex) { _logger.LogError(ex, "Failed to delete product: {Id}", productId); return false; }
     }
 
+    // Purpose: Get user from SQLite DB by email.
     public async Task<User?> GetUserFromDbAsync(string email)
     {
         try { return await _dbContext.Users.FirstOrDefaultAsync(u => u.Email == email); }
         catch (Exception ex) { _logger.LogError(ex, "Failed to get user from DB: {Email}", email); return null; }
     }
 
+    // Purpose: Get user from DB by ID (int or FirebaseUid string).
     public async Task<User?> GetUserFromDbByIdAsync(string id)
     {
         try
@@ -210,7 +219,7 @@ public class FirestoreService
         catch (Exception ex) { _logger.LogError(ex, "Failed to get user by Id: {Id}", id); return null; }
     }
 
-    // ========== BOSS NEW: BUYER HISTORY FOR 3 JOBS / 2 JOBS - REAL CODE ==========
+    // Purpose: Create buyer_history for Accept/Decline - 3 JOBS / 2 JOBS real code. Stores message with status successful/failed for buyer notification.
     public async Task<string> CreateBuyerHistoryAsync(string buyerId, string buyerPhone, string buyerName, string businessId, string businessName, string productId, string productName, string productImage, string message, string status)
     {
         if (!_firebaseService.IsInitialized) return "";
@@ -229,6 +238,7 @@ public class FirestoreService
                 ["productId"] = productId ?? "",
                 ["productName"] = productName ?? "Product",
                 ["productImage"] = productImage ?? "",
+                ["imageBase64"] = productImage ?? "",
                 ["message"] = message ?? "",
                 ["businessResponse"] = message ?? "",
                 ["status"] = status ?? "Pending",
@@ -237,11 +247,12 @@ public class FirestoreService
                 ["updatedAt"] = Timestamp.GetCurrentTimestamp()
             };
             await Firestore.Collection("buyer_history").Document(docId).SetAsync(data);
-            _logger.LogInformation("BOSS FirestoreService BuyerHistory Created {DocId}", docId);
+            _logger.LogInformation("BOSS FirestoreService BuyerHistory Created {DocId} for buyer {Buyer} status {Status}", docId, buyerId, status);
             return docId;
         }, "", $"CreateBuyerHistory {buyerId}");
     }
 
+    // Purpose: Get buyer history by buyerId or buyerPhone fallback, ordered DESC. Used by buyer Interests button.
     public async Task<List<Dictionary<string, object>>> GetBuyerHistoryAsync(string buyerId)
     {
         if (!_firebaseService.IsInitialized) return new();

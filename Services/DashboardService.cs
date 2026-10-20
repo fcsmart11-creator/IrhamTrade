@@ -113,7 +113,6 @@ namespace IrhamTrade.Server.Services
 
         private static bool IsBadId(string? id) => string.IsNullOrWhiteSpace(id) || id == "1" || id == "2" || id.Length < 10;
 
-        // ========== BOSS FIX: BUYER HISTORY - CORE FOR 3 JOBS / 2 JOBS ==========
         public async Task<string> CreateBuyerHistoryAsync(string buyerId, string buyerPhone, string buyerName, string businessId, string businessName, string productId, string productName, string productImage, string message, string status)
         {
             return await ExecuteWithRetryAsync(async () =>
@@ -151,7 +150,6 @@ namespace IrhamTrade.Server.Services
                 var snap = await _db.Collection("buyer_history").WhereEqualTo("buyerId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
                 if (snap.Count == 0)
                 {
-                    // Fallback by phone if buyerId not match
                     snap = await _db.Collection("buyer_history").WhereEqualTo("buyerPhone", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
                 }
                 return snap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)).ToList();
@@ -253,6 +251,7 @@ namespace IrhamTrade.Server.Services
         public async Task<bool> UpdateDeviceAsync(string deviceId, Dictionary<string, object> data) => await ExecuteWithRetryAsync(async () => { data["updatedAt"] = Timestamp.GetCurrentTimestamp(); await _db.Collection("devices").Document(deviceId).SetAsync(data, SetOptions.MergeAll); return true; }, false, $"UpdateDevice {deviceId}");
         public async Task<bool> DeleteDeviceAsync(string deviceId) => await ExecuteWithRetryAsync(async () => { await _db.Collection("devices").Document(deviceId).DeleteAsync(); return true; }, false, $"DeleteDevice {deviceId}");
 
+        // ========== BOSS FIX: CREATE INTEREST - NOW FETCHES IMAGE FROM DEVICES ==========
         public async Task<string> CreateInterestAsync(Dictionary<string, object> data)
         {
             try
@@ -266,7 +265,12 @@ namespace IrhamTrade.Server.Services
 
                 _logger.LogInformation("BOSS CreateInterest START buyer={Buyer} device={Device} business={Business}", buyerId, productId, businessId);
 
-                if (IsBadId(businessId) && !string.IsNullOrWhiteSpace(productId))
+                // BOSS FIX: Fetch businessId + REAL IMAGE from devices - SAME LOGIC AS TRANSACTION
+                string fetchedBusinessId = "";
+                string realImage = GetString(data, "productImage");
+                if (string.IsNullOrWhiteSpace(realImage)) realImage = GetString(data, "imageBase64");
+
+                if (!string.IsNullOrWhiteSpace(productId))
                 {
                     try
                     {
@@ -274,14 +278,24 @@ namespace IrhamTrade.Server.Services
                         if (deviceSnap.Exists)
                         {
                             var deviceData = deviceSnap.ToDictionary();
-                            var fetched = GetString(deviceData, "businessId");
-                            if (string.IsNullOrWhiteSpace(fetched)) fetched = GetString(deviceData, "ownerId");
-                            if (!IsBadId(fetched)) businessId = fetched;
+                            fetchedBusinessId = GetString(deviceData, "businessId");
+                            if (string.IsNullOrWhiteSpace(fetchedBusinessId)) fetchedBusinessId = GetString(deviceData, "ownerId");
+
+                            // FETCH REAL IMAGE
+                            var img1 = GetString(deviceData, "imageBase64");
+                            var img2 = GetString(deviceData, "imageUrl");
+                            var img3 = GetString(deviceData, "productImage");
+                            if (!string.IsNullOrWhiteSpace(img1) && img1.Length > 20) realImage = img1;
+                            else if (!string.IsNullOrWhiteSpace(img2) && img2.Length > 20) realImage = img2;
+                            else if (!string.IsNullOrWhiteSpace(img3) && img3.Length > 20) realImage = img3;
+
+                            _logger.LogInformation("BOSS CreateInterest FETCHED IMAGE len {Len} business {Biz}", realImage?.Length ?? 0, fetchedBusinessId);
                         }
                     }
                     catch (Exception ex) { _logger.LogWarning(ex, "Fetch device failed {Device}", productId); }
                 }
 
+                if (IsBadId(businessId) && !IsBadId(fetchedBusinessId)) businessId = fetchedBusinessId;
                 if (IsBadId(businessId)) throw new ArgumentException($"Invalid businessId '{businessId}' - Device owner not found.");
                 if (IsBadId(buyerId)) throw new ArgumentException($"Invalid buyerId '{buyerId}' - Please login again.");
 
@@ -293,8 +307,8 @@ namespace IrhamTrade.Server.Services
                 var productName = GetString(data, "productName");
                 var brand = GetString(data, "brand");
                 var price = GetString(data, "price");
-                var productImage = GetString(data, "productImage");
-                if (string.IsNullOrWhiteSpace(productImage)) productImage = GetString(data, "imageBase64");
+
+                if (string.IsNullOrWhiteSpace(realImage) || realImage == "--") realImage = "";
 
                 var cleanData = new Dictionary<string, object>
                 {
@@ -312,15 +326,15 @@ namespace IrhamTrade.Server.Services
                     ["productName"] = productName,
                     ["brand"] = brand,
                     ["price"] = price,
-                    ["productImage"] = productImage,
-                    ["imageBase64"] = productImage,
+                    ["productImage"] = realImage,
+                    ["imageBase64"] = realImage,
                     ["status"] = "Pending",
                     ["createdAt"] = Timestamp.GetCurrentTimestamp(),
                     ["updatedAt"] = Timestamp.GetCurrentTimestamp()
                 };
 
                 var doc = await _db.Collection("interests").AddAsync(cleanData);
-                _logger.LogInformation("BOSS Interest SUCCESS {InterestId}", doc.Id);
+                _logger.LogInformation("BOSS Interest SUCCESS {InterestId} with image len {Len}", doc.Id, realImage?.Length ?? 0);
                 return doc.Id;
             }
             catch (Exception ex)
@@ -352,7 +366,7 @@ namespace IrhamTrade.Server.Services
 
         public async Task<bool> DeleteInterestAsync(string interestId) => await ExecuteWithRetryAsync(async () => { await _db.Collection("interests").Document(interestId).DeleteAsync(); return true; }, false, $"DeleteInterest {interestId}");
 
-        // ========== BOSS FIX: ACCEPT = 3 JOBS INSIDE CODE - WITH IMAGE FETCH ==========
+        // ========== BOSS FIX: ACCEPT = 3 JOBS - FETCHES IMAGE ==========
         public async Task<string> AcceptOrderToTransactionAsync(string interestId, string businessName)
         {
             return await ExecuteWithRetryAsync(async () =>
@@ -376,7 +390,6 @@ namespace IrhamTrade.Server.Services
                 var brand = GetString(data, "brand");
                 var buyerLocation = GetString(data, "buyerLocation");
 
-                // BOSS FIX: FETCH REAL IMAGE FROM DEVICES COLLECTION
                 string realImage = productImageFromInterest;
                 try
                 {
@@ -398,7 +411,6 @@ namespace IrhamTrade.Server.Services
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "BOSS Fetch device image failed {Device}", productId); }
 
-                // JOB 1: Silent message to buyer_history with REAL IMAGE
                 try
                 {
                     var acceptMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: We will get in touch with you soon. Please wait for our call or WhatsApp message.";
@@ -407,7 +419,6 @@ namespace IrhamTrade.Server.Services
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "BOSS Accept JOB 1 failed but continue"); }
 
-                // JOB 2: Rewrite into transactions - Holds all accepted WITH REAL IMAGE
                 var transData = new Dictionary<string, object>(data)
                 {
                     ["transactionStatus"] = "Successful",
@@ -428,7 +439,6 @@ namespace IrhamTrade.Server.Services
                 var transDoc = await _db.Collection("transactions").AddAsync(transData);
                 _logger.LogInformation("BOSS Accept JOB 2 DONE - Transaction {TransId} with image len {Len}", transDoc.Id, realImage?.Length ?? 0);
 
-                // JOB 3: Delete device from devices
                 try
                 {
                     if (!string.IsNullOrWhiteSpace(productId))
@@ -445,7 +455,7 @@ namespace IrhamTrade.Server.Services
             }, null!, $"Accept {interestId}");
         }
 
-        // ========== BOSS FIX: DECLINE = 2 JOBS INSIDE CODE ==========
+        // ========== BOSS FIX: DECLINE = 2 JOBS - NOW FETCHES IMAGE TOO ==========
         public async Task<bool> DeclineOrderAsync(string interestId, string businessName)
         {
             return await ExecuteWithRetryAsync(async () =>
@@ -458,21 +468,42 @@ namespace IrhamTrade.Server.Services
                 var buyerPhone = GetString(data, "buyerPhone");
                 var buyerName = GetString(data, "buyerName");
                 var bId = GetString(data, "businessId");
+                if (string.IsNullOrWhiteSpace(bId)) bId = GetString(data, "ownerId");
                 var productId = GetString(data, "productId");
                 if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "deviceId");
                 var productName = GetString(data, "productName");
                 var productImage = GetString(data, "productImage");
+                if (string.IsNullOrWhiteSpace(productImage)) productImage = GetString(data, "imageBase64");
 
-                // JOB 1: Silent sorry message to buyer_history
+                // BOSS FIX: FETCH REAL IMAGE FROM DEVICES - SAME AS ACCEPT
+                string realImage = productImage;
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(productId))
+                    {
+                        var deviceSnap = await _db.Collection("devices").Document(productId).GetSnapshotAsync();
+                        if (deviceSnap.Exists)
+                        {
+                            var deviceData = deviceSnap.ToDictionary();
+                            var img1 = GetString(deviceData, "imageBase64");
+                            var img2 = GetString(deviceData, "imageUrl");
+                            var img3 = GetString(deviceData, "productImage");
+                            if (!string.IsNullOrWhiteSpace(img1) && img1.Length > 20) realImage = img1;
+                            else if (!string.IsNullOrWhiteSpace(img2) && img2.Length > 20) realImage = img2;
+                            else if (!string.IsNullOrWhiteSpace(img3) && img3.Length > 20) realImage = img3;
+                        }
+                    }
+                }
+                catch { }
+
                 try
                 {
                     var declineMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: Sorry, this product is no longer available. Thank you.";
-                    await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, productImage, declineMsg, "failed");
+                    await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, realImage, declineMsg, "failed");
                     _logger.LogInformation("BOSS Decline JOB 1 DONE - BuyerHistory failed message");
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "BOSS Decline JOB 1 failed"); }
 
-                // JOB 2: Update as Failed - moves to Failed tab
                 await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Failed", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp(), ["businessResponse"] = "Sorry, this product is no longer available" }, SetOptions.MergeAll);
                 _logger.LogInformation("BOSS Decline JOB 2 DONE - Interest marked Failed");
 
@@ -482,10 +513,8 @@ namespace IrhamTrade.Server.Services
 
         public async Task<List<Dictionary<string, object>>> GetTransactionsByBusinessAsync(string businessId) => await ExecuteWithRetryAsync(async () => { var snap = await _db.Collection("transactions").WhereEqualTo("businessId", businessId).GetSnapshotAsync(); return snap.Documents.Select(d => SanitizeTransaction(d.ToDictionary(), d.Id)).ToList(); }, new List<Dictionary<string, object>>(), $"GetTrans {businessId}");
 
-        // Complete = Delete transaction permanently - Product sold
         public async Task<bool> CompleteTransactionAsync(string transactionId) => await ExecuteWithRetryAsync(async () => { await _db.Collection("transactions").Document(transactionId).DeleteAsync(); return true; }, false, $"Complete {transactionId}");
 
-        // Incomplete = Return product to store for buyers to see again
         public async Task<bool> IncompleteTransactionAsync(string transactionId) => await ExecuteWithRetryAsync(async () =>
         {
             var snap = await _db.Collection("transactions").Document(transactionId).GetSnapshotAsync();
@@ -504,7 +533,6 @@ namespace IrhamTrade.Server.Services
             if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "ownerId");
             var businessName = GetString(data, "businessName");
 
-            // Republish to devices
             var newId = Guid.NewGuid().ToString("N");
             var newDevice = new Dictionary<string, object>
             {

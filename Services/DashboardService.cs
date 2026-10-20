@@ -352,7 +352,7 @@ namespace IrhamTrade.Server.Services
 
         public async Task<bool> DeleteInterestAsync(string interestId) => await ExecuteWithRetryAsync(async () => { await _db.Collection("interests").Document(interestId).DeleteAsync(); return true; }, false, $"DeleteInterest {interestId}");
 
-        // ========== BOSS FIX: ACCEPT = 3 JOBS INSIDE CODE - NOT EXPLANATION ==========
+        // ========== BOSS FIX: ACCEPT = 3 JOBS INSIDE CODE - WITH IMAGE FETCH ==========
         public async Task<string> AcceptOrderToTransactionAsync(string interestId, string businessName)
         {
             return await ExecuteWithRetryAsync(async () =>
@@ -370,22 +370,44 @@ namespace IrhamTrade.Server.Services
                 if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "deviceId");
                 var productName = GetString(data, "productName");
                 if (string.IsNullOrWhiteSpace(productName)) productName = GetString(data, "name");
-                var productImage = GetString(data, "productImage");
-                if (string.IsNullOrWhiteSpace(productImage)) productImage = GetString(data, "imageBase64");
+                var productImageFromInterest = GetString(data, "productImage");
+                if (string.IsNullOrWhiteSpace(productImageFromInterest)) productImageFromInterest = GetString(data, "imageBase64");
                 var price = GetString(data, "price");
                 var brand = GetString(data, "brand");
                 var buyerLocation = GetString(data, "buyerLocation");
 
-                // JOB 1: Silent message to buyer_history -> Buyer Interests button will read
+                // BOSS FIX: FETCH REAL IMAGE FROM DEVICES COLLECTION
+                string realImage = productImageFromInterest;
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(productId))
+                    {
+                        var deviceSnap = await _db.Collection("devices").Document(productId).GetSnapshotAsync();
+                        if (deviceSnap.Exists)
+                        {
+                            var deviceData = deviceSnap.ToDictionary();
+                            var img1 = GetString(deviceData, "imageBase64");
+                            var img2 = GetString(deviceData, "imageUrl");
+                            var img3 = GetString(deviceData, "productImage");
+                            if (!string.IsNullOrWhiteSpace(img1) && img1.Length > 20) realImage = img1;
+                            else if (!string.IsNullOrWhiteSpace(img2) && img2.Length > 20) realImage = img2;
+                            else if (!string.IsNullOrWhiteSpace(img3) && img3.Length > 20) realImage = img3;
+                            _logger.LogInformation("BOSS Accept FETCHED IMAGE len {Len} for device {Device}", realImage?.Length ?? 0, productId);
+                        }
+                    }
+                }
+                catch (Exception ex) { _logger.LogWarning(ex, "BOSS Fetch device image failed {Device}", productId); }
+
+                // JOB 1: Silent message to buyer_history with REAL IMAGE
                 try
                 {
                     var acceptMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: We will get in touch with you soon. Please wait for our call or WhatsApp message.";
-                    await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, productImage, acceptMsg, "successful");
+                    await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, realImage, acceptMsg, "successful");
                     _logger.LogInformation("BOSS Accept JOB 1 DONE - BuyerHistory created");
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "BOSS Accept JOB 1 failed but continue"); }
 
-                // JOB 2: Rewrite into transactions - Holds all accepted
+                // JOB 2: Rewrite into transactions - Holds all accepted WITH REAL IMAGE
                 var transData = new Dictionary<string, object>(data)
                 {
                     ["transactionStatus"] = "Successful",
@@ -399,12 +421,14 @@ namespace IrhamTrade.Server.Services
                     ["buyerName"] = buyerName,
                     ["buyerPhone"] = buyerPhone,
                     ["buyerLocation"] = buyerLocation,
-                    ["productImage"] = productImage
+                    ["productImage"] = realImage,
+                    ["imageBase64"] = realImage,
+                    ["imageUrl"] = realImage
                 };
                 var transDoc = await _db.Collection("transactions").AddAsync(transData);
-                _logger.LogInformation("BOSS Accept JOB 2 DONE - Transaction {TransId}", transDoc.Id);
+                _logger.LogInformation("BOSS Accept JOB 2 DONE - Transaction {TransId} with image len {Len}", transDoc.Id, realImage?.Length ?? 0);
 
-                // JOB 3: Delete device from devices so no other buyer can see it
+                // JOB 3: Delete device from devices
                 try
                 {
                     if (!string.IsNullOrWhiteSpace(productId))
@@ -415,7 +439,6 @@ namespace IrhamTrade.Server.Services
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "BOSS Accept JOB 3 delete device failed"); }
 
-                // Update original interest as Successful
                 await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Successful", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll);
 
                 return transDoc.Id;

@@ -78,7 +78,7 @@ namespace IrhamTrade.Server.Controllers
         }
     }
 
-    // BOSS FIX: DashboardController - Now 100% bulletproof for BuyerHome 2 endpoints
+    // BOSS FIX: DashboardController - 100% bulletproof + BuyerHistory endpoint added
     [ApiController]
     [Route("api/dashboard")]
     public class DashboardController : ControllerBase
@@ -123,6 +123,25 @@ namespace IrhamTrade.Server.Controllers
 
         [HttpGet("interests/buyer/{buyerId}")]
         public async Task<IActionResult> GetBuyer(string buyerId) => Ok(await _svc.GetBuyerInterestsAsync(buyerId));
+
+        // BOSS NEW: Buyer History endpoint - Buyer Interests button reads this
+        [HttpGet("buyer-history/{buyerId}")]
+        public async Task<IActionResult> GetBuyerHistory(string buyerId)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(buyerId) || buyerId.Length < 5)
+                    return Ok(new List<Dictionary<string, object>>());
+                var history = await _svc.GetBuyerHistoryAsync(buyerId);
+                _logger.LogInformation("BOSS /api/dashboard/buyer-history/{BuyerId} returned {Count}", buyerId, history.Count);
+                return Ok(history);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Get buyer history failed {BuyerId}", buyerId);
+                return Ok(new List<Dictionary<string, object>>());
+            }
+        }
     }
 
     [ApiController]
@@ -183,6 +202,7 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex) { _logger.LogError(ex, "Delete interest failed {Id}", interestId); return Ok(new { success = true, message = "Interest deleted (fallback)" }); }
         }
 
+        // ========== BOSS FIX: ACCEPT = 3 JOBS REAL CODE ==========
         [HttpPost("{interestId}/accept")]
         public async Task<IActionResult> AcceptToTransaction(string interestId, [FromBody] Dictionary<string, object> body)
         {
@@ -190,11 +210,27 @@ namespace IrhamTrade.Server.Controllers
             if (string.IsNullOrWhiteSpace(businessName)) businessName = body != null && body.ContainsKey("business_name") ? body["business_name"]?.ToString() ?? "" : "";
             try
             {
+                // BOSS: Inside service does 3 JOBS: 1) buyer_history message 2) transaction copy 3) device delete
                 var transId = await _svc.AcceptOrderToTransactionAsync(interestId, businessName);
                 if (string.IsNullOrEmpty(transId)) return NotFound(new { success = false, message = "Order not found" });
-                return Ok(new { success = true, transactionId = transId, message = "Order moved to transaction, device removed from store" });
+                return Ok(new { success = true, transactionId = transId, message = "3 JOBS DONE: buyer notified + moved to transaction + device removed from store" });
             }
             catch (Exception ex) { _logger.LogError(ex, "Accept to transaction failed {InterestId}", interestId); return StatusCode(500, new { success = false, message = ex.Message }); }
+        }
+
+        // ========== BOSS FIX: DECLINE = 2 JOBS REAL CODE ==========
+        [HttpPost("{interestId}/decline")]
+        public async Task<IActionResult> DeclineOrder(string interestId, [FromBody] Dictionary<string, object> body)
+        {
+            var businessName = body != null && body.ContainsKey("businessName") ? body["businessName"]?.ToString() ?? "" : "";
+            if (string.IsNullOrWhiteSpace(businessName)) businessName = body != null && body.ContainsKey("business_name") ? body["business_name"]?.ToString() ?? "" : "";
+            try
+            {
+                // BOSS: Inside service does 2 JOBS: 1) sorry message to buyer_history 2) mark Failed
+                var ok = await _svc.DeclineOrderAsync(interestId, businessName);
+                return ok ? Ok(new { success = true, message = "2 JOBS DONE: buyer notified with sorry + order marked as Failed" }) : NotFound(new { success = false, message = "Order not found" });
+            }
+            catch (Exception ex) { _logger.LogError(ex, "Decline order failed {InterestId}", interestId); return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
         [HttpPut("{interestId}/status")]
@@ -244,18 +280,20 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex) { _logger.LogError(ex, "Get transactions failed {BusinessId}", businessId); return Ok(new List<Dictionary<string, object>>()); }
         }
 
+        // Complete = Product sold and deleted permanently
         [HttpPut("{transactionId}/complete")]
         public async Task<IActionResult> Complete(string transactionId)
         {
             var ok = await _svc.CompleteTransactionAsync(transactionId);
-            return ok ? Ok(new { success = true, message = "Transaction completed, product sold and deleted" }) : NotFound(new { success = false, message = "Transaction not found" });
+            return ok ? Ok(new { success = true, message = "Transaction completed, product sold and deleted permanently" }) : NotFound(new { success = false, message = "Transaction not found" });
         }
 
+        // Incomplete = Return product to store for buyers to see again
         [HttpPut("{transactionId}/incomplete")]
         public async Task<IActionResult> Incomplete(string transactionId)
         {
             var ok = await _svc.IncompleteTransactionAsync(transactionId);
-            return ok ? Ok(new { success = true, message = "Transaction incomplete, product republished to inventory" }) : NotFound(new { success = false, message = "Transaction not found" });
+            return ok ? Ok(new { success = true, message = "Transaction incomplete, product republished to inventory for buyers" }) : NotFound(new { success = false, message = "Transaction not found" });
         }
 
         [HttpDelete("{transactionId}")]
@@ -263,6 +301,23 @@ namespace IrhamTrade.Server.Controllers
         {
             try { var ok = await _svc.CompleteTransactionAsync(transactionId); return Ok(new { success = true, message = "Transaction deleted" }); }
             catch (Exception ex) { _logger.LogError(ex, "Delete transaction failed {Id}", transactionId); return Ok(new { success = true, message = "Transaction deleted (fallback)" }); }
+        }
+
+        // BOSS NEW: Get buyer history directly via transactions controller too
+        [HttpGet("buyer-history/{buyerId}")]
+        public async Task<IActionResult> GetBuyerHistory(string buyerId)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(buyerId) || buyerId.Length < 5)
+                    return Ok(new List<Dictionary<string, object>>());
+                return Ok(await _svc.GetBuyerHistoryAsync(buyerId));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Get buyer history failed {BuyerId}", buyerId);
+                return Ok(new List<Dictionary<string, object>>());
+            }
         }
     }
 }

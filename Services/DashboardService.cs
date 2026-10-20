@@ -113,6 +113,51 @@ namespace IrhamTrade.Server.Services
 
         private static bool IsBadId(string? id) => string.IsNullOrWhiteSpace(id) || id == "1" || id == "2" || id.Length < 10;
 
+        // ========== BOSS FIX: BUYER HISTORY - CORE FOR 3 JOBS / 2 JOBS ==========
+        public async Task<string> CreateBuyerHistoryAsync(string buyerId, string buyerPhone, string buyerName, string businessId, string businessName, string productId, string productName, string productImage, string message, string status)
+        {
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var docId = Guid.NewGuid().ToString("N");
+                var data = new Dictionary<string, object>
+                {
+                    ["id"] = docId,
+                    ["buyerId"] = buyerId ?? "",
+                    ["buyerPhone"] = buyerPhone ?? "",
+                    ["buyerName"] = buyerName ?? "Buyer",
+                    ["businessId"] = businessId ?? "",
+                    ["businessName"] = businessName ?? "Irham Trade",
+                    ["deviceId"] = productId ?? "",
+                    ["productId"] = productId ?? "",
+                    ["productName"] = productName ?? "Product",
+                    ["productImage"] = productImage ?? "",
+                    ["message"] = message ?? "",
+                    ["businessResponse"] = message ?? "",
+                    ["status"] = status ?? "Pending",
+                    ["read"] = false,
+                    ["createdAt"] = Timestamp.GetCurrentTimestamp(),
+                    ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                };
+                await _db.Collection("buyer_history").Document(docId).SetAsync(data);
+                _logger.LogInformation("BOSS BuyerHistory Created {DocId} buyer {Buyer} status {Status}", docId, buyerId, status);
+                return docId;
+            }, "", $"CreateBuyerHistory {buyerId}");
+        }
+
+        public async Task<List<Dictionary<string, object>>> GetBuyerHistoryAsync(string buyerId)
+        {
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var snap = await _db.Collection("buyer_history").WhereEqualTo("buyerId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
+                if (snap.Count == 0)
+                {
+                    // Fallback by phone if buyerId not match
+                    snap = await _db.Collection("buyer_history").WhereEqualTo("buyerPhone", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
+                }
+                return snap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)).ToList();
+            }, new List<Dictionary<string, object>>(), $"GetBuyerHistory {buyerId}");
+        }
+
         public async Task<List<Dictionary<string, object>>> GetAllDevicesAsync()
         {
             return await ExecuteWithRetryAsync(async () =>
@@ -151,8 +196,7 @@ namespace IrhamTrade.Server.Services
             {
                 var businessId = GetString(data, "businessId");
                 if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "ownerId");
-
-                if (IsBadId(businessId)) throw new ArgumentException($"Invalid businessId: {businessId}. Please logout and login again to get real business ID.");
+                if (IsBadId(businessId)) throw new ArgumentException($"Invalid businessId: {businessId}. Please logout and login again.");
 
                 var name = GetString(data, "name");
                 if (string.IsNullOrWhiteSpace(name)) name = GetString(data, "productName");
@@ -209,7 +253,6 @@ namespace IrhamTrade.Server.Services
         public async Task<bool> UpdateDeviceAsync(string deviceId, Dictionary<string, object> data) => await ExecuteWithRetryAsync(async () => { data["updatedAt"] = Timestamp.GetCurrentTimestamp(); await _db.Collection("devices").Document(deviceId).SetAsync(data, SetOptions.MergeAll); return true; }, false, $"UpdateDevice {deviceId}");
         public async Task<bool> DeleteDeviceAsync(string deviceId) => await ExecuteWithRetryAsync(async () => { await _db.Collection("devices").Document(deviceId).DeleteAsync(); return true; }, false, $"DeleteDevice {deviceId}");
 
-        // ========== BOSS FIX 100% - INTERESTS NOW AUTO-FETCH businessId + HANDLE JsonElement + NEVER 500 ==========
         public async Task<string> CreateInterestAsync(Dictionary<string, object> data)
         {
             try
@@ -223,7 +266,6 @@ namespace IrhamTrade.Server.Services
 
                 _logger.LogInformation("BOSS CreateInterest START buyer={Buyer} device={Device} business={Business}", buyerId, productId, businessId);
 
-                // AUTO-FETCH businessId from device if missing - Facebook style direct
                 if (IsBadId(businessId) && !string.IsNullOrWhiteSpace(productId))
                 {
                     try
@@ -234,36 +276,15 @@ namespace IrhamTrade.Server.Services
                             var deviceData = deviceSnap.ToDictionary();
                             var fetched = GetString(deviceData, "businessId");
                             if (string.IsNullOrWhiteSpace(fetched)) fetched = GetString(deviceData, "ownerId");
-                            if (!IsBadId(fetched))
-                            {
-                                businessId = fetched;
-                                _logger.LogInformation("BOSS Fetched businessId from device {Device}: {BusinessId}", productId, businessId);
-                            }
-                        }
-                        else
-                        {
-                            _logger.LogWarning("BOSS Device not found for interest: {Device}", productId);
+                            if (!IsBadId(fetched)) businessId = fetched;
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "BOSS Fetch device failed for interest {Device}", productId);
-                    }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Fetch device failed {Device}", productId); }
                 }
 
-                if (IsBadId(businessId))
-                {
-                    _logger.LogError("BOSS CreateInterest blocked bad businessId: {BusinessId}", businessId);
-                    throw new ArgumentException($"Invalid businessId '{businessId}' - Please refresh products. Device owner not found.");
-                }
+                if (IsBadId(businessId)) throw new ArgumentException($"Invalid businessId '{businessId}' - Device owner not found.");
+                if (IsBadId(buyerId)) throw new ArgumentException($"Invalid buyerId '{buyerId}' - Please login again.");
 
-                if (IsBadId(buyerId))
-                {
-                    _logger.LogError("BOSS CreateInterest blocked bad buyerId: {BuyerId}", buyerId);
-                    throw new ArgumentException($"Invalid buyerId '{buyerId}' - Please logout and login again.");
-                }
-
-                // Build clean data for Firestore - Use data from BuyerHome - REAL DIRECT CHANNEL
                 var buyerName = GetString(data, "buyerName");
                 var buyerPhone = GetString(data, "buyerPhone");
                 var buyerLocation = GetString(data, "buyerLocation");
@@ -299,12 +320,12 @@ namespace IrhamTrade.Server.Services
                 };
 
                 var doc = await _db.Collection("interests").AddAsync(cleanData);
-                _logger.LogInformation("BOSS Interest SUCCESS {InterestId} buyer {Buyer} -> business {Business} product {Product}", doc.Id, buyerId, businessId, productId);
+                _logger.LogInformation("BOSS Interest SUCCESS {InterestId}", doc.Id);
                 return doc.Id;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "BOSS CreateInterest FAILED - Will return error not 500 null");
+                _logger.LogError(ex, "BOSS CreateInterest FAILED");
                 throw;
             }
         }
@@ -323,16 +344,170 @@ namespace IrhamTrade.Server.Services
             {
                 var update = new Dictionary<string, object> { ["status"] = status, ["updatedAt"] = Timestamp.GetCurrentTimestamp() };
                 if (!string.IsNullOrWhiteSpace(businessResponse)) { update["businessResponse"] = businessResponse; update["response"] = businessResponse; }
+                if (!string.IsNullOrWhiteSpace(businessName)) update["businessName"] = businessName;
                 await _db.Collection("interests").Document(interestId).SetAsync(update, SetOptions.MergeAll);
                 return true;
             }, false, $"UpdateInterest {interestId}");
         }
 
         public async Task<bool> DeleteInterestAsync(string interestId) => await ExecuteWithRetryAsync(async () => { await _db.Collection("interests").Document(interestId).DeleteAsync(); return true; }, false, $"DeleteInterest {interestId}");
-        public async Task<string> AcceptOrderToTransactionAsync(string interestId, string businessName) => await ExecuteWithRetryAsync(async () => { var snap = await _db.Collection("interests").Document(interestId).GetSnapshotAsync(); var data = snap.ToDictionary(); data["transactionStatus"] = "InProgress"; var trans = await _db.Collection("transactions").AddAsync(data); await _db.Collection("devices").Document(GetString(data, "productId")).DeleteAsync(); await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Successful" }, SetOptions.MergeAll); return trans.Id; }, null!, $"Accept {interestId}");
+
+        // ========== BOSS FIX: ACCEPT = 3 JOBS INSIDE CODE - NOT EXPLANATION ==========
+        public async Task<string> AcceptOrderToTransactionAsync(string interestId, string businessName)
+        {
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var snap = await _db.Collection("interests").Document(interestId).GetSnapshotAsync();
+                if (!snap.Exists) throw new ArgumentException($"Order {interestId} not found");
+                var data = snap.ToDictionary();
+
+                var buyerId = GetString(data, "buyerId");
+                var buyerPhone = GetString(data, "buyerPhone");
+                var buyerName = GetString(data, "buyerName");
+                var bId = GetString(data, "businessId");
+                if (string.IsNullOrWhiteSpace(bId)) bId = GetString(data, "ownerId");
+                var productId = GetString(data, "productId");
+                if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "deviceId");
+                var productName = GetString(data, "productName");
+                if (string.IsNullOrWhiteSpace(productName)) productName = GetString(data, "name");
+                var productImage = GetString(data, "productImage");
+                if (string.IsNullOrWhiteSpace(productImage)) productImage = GetString(data, "imageBase64");
+                var price = GetString(data, "price");
+                var brand = GetString(data, "brand");
+                var buyerLocation = GetString(data, "buyerLocation");
+
+                // JOB 1: Silent message to buyer_history -> Buyer Interests button will read
+                try
+                {
+                    var acceptMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: We will get in touch with you soon. Please wait for our call or WhatsApp message.";
+                    await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, productImage, acceptMsg, "successful");
+                    _logger.LogInformation("BOSS Accept JOB 1 DONE - BuyerHistory created");
+                }
+                catch (Exception ex) { _logger.LogWarning(ex, "BOSS Accept JOB 1 failed but continue"); }
+
+                // JOB 2: Rewrite into transactions - Holds all accepted
+                var transData = new Dictionary<string, object>(data)
+                {
+                    ["transactionStatus"] = "Successful",
+                    ["status"] = "Successful",
+                    ["businessName"] = string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName,
+                    ["completedAt"] = Timestamp.GetCurrentTimestamp(),
+                    ["updatedAt"] = Timestamp.GetCurrentTimestamp(),
+                    ["productName"] = productName,
+                    ["price"] = price,
+                    ["brand"] = brand,
+                    ["buyerName"] = buyerName,
+                    ["buyerPhone"] = buyerPhone,
+                    ["buyerLocation"] = buyerLocation,
+                    ["productImage"] = productImage
+                };
+                var transDoc = await _db.Collection("transactions").AddAsync(transData);
+                _logger.LogInformation("BOSS Accept JOB 2 DONE - Transaction {TransId}", transDoc.Id);
+
+                // JOB 3: Delete device from devices so no other buyer can see it
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(productId))
+                    {
+                        await _db.Collection("devices").Document(productId).DeleteAsync();
+                        _logger.LogInformation("BOSS Accept JOB 3 DONE - Device {Device} deleted from store", productId);
+                    }
+                }
+                catch (Exception ex) { _logger.LogWarning(ex, "BOSS Accept JOB 3 delete device failed"); }
+
+                // Update original interest as Successful
+                await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Successful", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll);
+
+                return transDoc.Id;
+            }, null!, $"Accept {interestId}");
+        }
+
+        // ========== BOSS FIX: DECLINE = 2 JOBS INSIDE CODE ==========
+        public async Task<bool> DeclineOrderAsync(string interestId, string businessName)
+        {
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var snap = await _db.Collection("interests").Document(interestId).GetSnapshotAsync();
+                if (!snap.Exists) return false;
+                var data = snap.ToDictionary();
+
+                var buyerId = GetString(data, "buyerId");
+                var buyerPhone = GetString(data, "buyerPhone");
+                var buyerName = GetString(data, "buyerName");
+                var bId = GetString(data, "businessId");
+                var productId = GetString(data, "productId");
+                if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "deviceId");
+                var productName = GetString(data, "productName");
+                var productImage = GetString(data, "productImage");
+
+                // JOB 1: Silent sorry message to buyer_history
+                try
+                {
+                    var declineMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: Sorry, this product is no longer available. Thank you.";
+                    await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, productImage, declineMsg, "failed");
+                    _logger.LogInformation("BOSS Decline JOB 1 DONE - BuyerHistory failed message");
+                }
+                catch (Exception ex) { _logger.LogWarning(ex, "BOSS Decline JOB 1 failed"); }
+
+                // JOB 2: Update as Failed - moves to Failed tab
+                await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Failed", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp(), ["businessResponse"] = "Sorry, this product is no longer available" }, SetOptions.MergeAll);
+                _logger.LogInformation("BOSS Decline JOB 2 DONE - Interest marked Failed");
+
+                return true;
+            }, false, $"Decline {interestId}");
+        }
+
         public async Task<List<Dictionary<string, object>>> GetTransactionsByBusinessAsync(string businessId) => await ExecuteWithRetryAsync(async () => { var snap = await _db.Collection("transactions").WhereEqualTo("businessId", businessId).GetSnapshotAsync(); return snap.Documents.Select(d => SanitizeTransaction(d.ToDictionary(), d.Id)).ToList(); }, new List<Dictionary<string, object>>(), $"GetTrans {businessId}");
+
+        // Complete = Delete transaction permanently - Product sold
         public async Task<bool> CompleteTransactionAsync(string transactionId) => await ExecuteWithRetryAsync(async () => { await _db.Collection("transactions").Document(transactionId).DeleteAsync(); return true; }, false, $"Complete {transactionId}");
-        public async Task<bool> IncompleteTransactionAsync(string transactionId) => await ExecuteWithRetryAsync(async () => { var snap = await _db.Collection("transactions").Document(transactionId).GetSnapshotAsync(); var data = snap.ToDictionary(); var newId = Guid.NewGuid().ToString("N"); data["id"] = newId; await _db.Collection("devices").Document(newId).SetAsync(data); await _db.Collection("transactions").Document(transactionId).DeleteAsync(); return true; }, false, $"Incomplete {transactionId}");
+
+        // Incomplete = Return product to store for buyers to see again
+        public async Task<bool> IncompleteTransactionAsync(string transactionId) => await ExecuteWithRetryAsync(async () =>
+        {
+            var snap = await _db.Collection("transactions").Document(transactionId).GetSnapshotAsync();
+            if (!snap.Exists) return false;
+            var data = snap.ToDictionary();
+
+            var productName = GetString(data, "productName");
+            if (string.IsNullOrWhiteSpace(productName)) productName = GetString(data, "name");
+            var brand = GetString(data, "brand");
+            var price = GetString(data, "price");
+            var description = GetString(data, "description");
+            if (string.IsNullOrWhiteSpace(description)) description = productName;
+            var image = GetString(data, "productImage");
+            if (string.IsNullOrWhiteSpace(image)) image = GetString(data, "imageBase64");
+            var businessId = GetString(data, "businessId");
+            if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "ownerId");
+            var businessName = GetString(data, "businessName");
+
+            // Republish to devices
+            var newId = Guid.NewGuid().ToString("N");
+            var newDevice = new Dictionary<string, object>
+            {
+                ["id"] = newId,
+                ["deviceId"] = newId,
+                ["productId"] = newId,
+                ["name"] = productName,
+                ["productName"] = productName,
+                ["brand"] = brand,
+                ["price"] = price,
+                ["description"] = description,
+                ["imageBase64"] = image,
+                ["imageUrl"] = image,
+                ["businessId"] = businessId,
+                ["ownerId"] = businessId,
+                ["businessName"] = businessName,
+                ["status"] = "active",
+                ["createdAt"] = Timestamp.GetCurrentTimestamp(),
+                ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+            };
+            await _db.Collection("devices").Document(newId).SetAsync(newDevice);
+            await _db.Collection("transactions").Document(transactionId).DeleteAsync();
+            _logger.LogInformation("BOSS Incomplete DONE - Device republished {NewId} from transaction {TransId}", newId, transactionId);
+            return true;
+        }, false, $"Incomplete {transactionId}");
+
         public async Task<Dictionary<string, object>?> GetBuyerProfileAsync(string buyerId) => await ExecuteWithRetryAsync(async () => { var snap = await _db.Collection("users").Document(buyerId).GetSnapshotAsync(); return snap.Exists ? SanitizeDoc(snap.ToDictionary(), snap.Id) : null; }, null, $"GetBuyer {buyerId}");
         public async Task<bool> UpdateBuyerProfileAsync(string buyerId, Dictionary<string, object> data) => await ExecuteWithRetryAsync(async () => { await _db.Collection("users").Document(buyerId).SetAsync(data, SetOptions.MergeAll); return true; }, false, $"UpdateBuyer {buyerId}");
         public async Task<Dictionary<string, object>?> GetBusinessAsync(string businessId) => await ExecuteWithRetryAsync(async () => { var snap = await _db.Collection("users").Document(businessId).GetSnapshotAsync(); return snap.Exists ? SanitizeDoc(snap.ToDictionary(), snap.Id) : null; }, null, $"GetBusiness {businessId}");

@@ -54,30 +54,17 @@ public class FirestoreService
         return fallback;
     }
 
-    // ========== BOSS FIX 100% - ONLY USERS COLLECTION - ONLY REAL FIREBASE UID - NO DOUBLE ==========
     public async Task<bool> SaveUserToFirestoreAsync(User user)
     {
         if (!_firebaseService.IsInitialized) return false;
-
         try
         {
             return await ExecuteWithRetryAsync(async () =>
             {
                 var docId = user.FirebaseUid;
-                if (string.IsNullOrWhiteSpace(docId))
-                {
-                    docId = Guid.NewGuid().ToString("N");
-                    _logger.LogWarning("SaveUserToFirestore: FirebaseUid missing for {Email}, using Guid {DocId} instead of SQL Id {SqlId}", user.Email, docId, user.Id);
-                }
-
-                if (docId == "1" || docId == "2" || docId.Length < 10)
-                {
-                    docId = Guid.NewGuid().ToString("N");
-                    _logger.LogWarning("SaveUserToFirestore: Blocked bad docId, using Guid {DocId}", docId);
-                }
-
+                if (string.IsNullOrWhiteSpace(docId)) docId = Guid.NewGuid().ToString("N");
+                if (docId == "1" || docId == "2" || docId.Length < 10) docId = Guid.NewGuid().ToString("N");
                 var docRef = Firestore.Collection("users").Document(docId);
-
                 var data = new Dictionary<string, object>
                 {
                     { "id", docId },
@@ -100,20 +87,14 @@ public class FirestoreService
                     { "isActive", true },
                     { "updatedAt", Timestamp.GetCurrentTimestamp() }
                 };
-
                 await docRef.SetAsync(data, SetOptions.MergeAll);
-                _logger.LogInformation("User saved to Firestore ONE TIME: users/{DocId} Email: {Email} Role: {Role}", docId, user.Email, user.Role);
+                _logger.LogInformation("User saved to Firestore ONE TIME: users/{DocId}", docId);
                 return true;
             }, false, $"SaveUser {user.Email}");
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to save user to Firestore: {Email}", user.Email);
-            return false;
-        }
+        catch (Exception ex) { _logger.LogError(ex, "Failed to save user to Firestore: {Email}", user.Email); return false; }
     }
 
-    // ========== BOSS FIX - BUYER ALSO ONLY USERS - NO BUYERS COLLECTION - NO DOUBLE ==========
     public async Task<bool> SaveBuyerProfileAsync(User user)
     {
         if (!_firebaseService.IsInitialized) return false;
@@ -122,14 +103,9 @@ public class FirestoreService
             return await ExecuteWithRetryAsync(async () =>
             {
                 var docId = user.FirebaseUid;
-                if (string.IsNullOrWhiteSpace(docId))
-                    docId = Guid.NewGuid().ToString("N");
-
-                if (docId == "1" || docId == "2" || docId.Length < 10)
-                    docId = Guid.NewGuid().ToString("N");
-
+                if (string.IsNullOrWhiteSpace(docId)) docId = Guid.NewGuid().ToString("N");
+                if (docId == "1" || docId == "2" || docId.Length < 10) docId = Guid.NewGuid().ToString("N");
                 var docRef = Firestore.Collection("users").Document(docId);
-
                 var data = new Dictionary<string, object>
                 {
                     { "id", docId },
@@ -148,37 +124,23 @@ public class FirestoreService
                     { "createdAt", Timestamp.FromDateTime(DateTime.SpecifyKind(user.CreatedAt, DateTimeKind.Utc)) },
                     { "updatedAt", Timestamp.GetCurrentTimestamp() }
                 };
-
                 await docRef.SetAsync(data, SetOptions.MergeAll);
-                _logger.LogInformation("Buyer saved to Firestore ONE TIME: users/{DocId} Email: {Email}", docId, user.Email);
                 return true;
             }, false, $"SaveBuyer {user.Email}");
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to save buyer: {Email}", user.Email);
-            return false;
-        }
+        catch (Exception ex) { _logger.LogError(ex, "Failed to save buyer: {Email}", user.Email); return false; }
     }
 
-    // ========== BOSS FIX - PRODUCTS - ONLY DEVICES COLLECTION - NO PRODUCTS COLLECTION - NO DOUBLE ==========
     public async Task<bool> SaveProductToFirestoreAsync(int productId, string businessId, string businessName, string name, string category, double price, string description, string imageUrl, string location)
     {
         if (!_firebaseService.IsInitialized) return false;
-
-        if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2" || businessId.Length < 10)
-        {
-            _logger.LogWarning("SaveProduct blocked bad businessId {BusinessId} for product {Name}", businessId, name);
-            return false;
-        }
-
+        if (string.IsNullOrWhiteSpace(businessId) || businessId == "1" || businessId == "2" || businessId.Length < 10) return false;
         try
         {
             return await ExecuteWithRetryAsync(async () =>
             {
                 var docId = productId.ToString();
                 var docRef = Firestore.Collection("devices").Document(docId);
-
                 var data = new Dictionary<string, object>
                 {
                     { "id", productId },
@@ -210,17 +172,11 @@ public class FirestoreService
                     { "createdAt", Timestamp.GetCurrentTimestamp() },
                     { "updatedAt", Timestamp.GetCurrentTimestamp() }
                 };
-
                 await docRef.SetAsync(data, SetOptions.MergeAll);
-                _logger.LogInformation("Product saved LIVE to Firestore ONE TIME: devices/{Id} Business: {Biz} RealId: {RealId}", docId, businessName, businessId);
                 return true;
             }, false, $"SaveProduct {name}");
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to save product: {Name}", name);
-            return false;
-        }
+        catch (Exception ex) { _logger.LogError(ex, "Failed to save product: {Name}", name); return false; }
     }
 
     public async Task<bool> DeleteProductFromFirestoreAsync(int productId)
@@ -235,40 +191,67 @@ public class FirestoreService
                 return true;
             }, false, $"DeleteProduct {productId}");
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to delete product: {Id}", productId);
-            return false;
-        }
+        catch (Exception ex) { _logger.LogError(ex, "Failed to delete product: {Id}", productId); return false; }
     }
 
     public async Task<User?> GetUserFromDbAsync(string email)
     {
-        try
-        {
-            return await _dbContext.Users.FirstOrDefaultAsync(u => u.Email == email);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to get user from DB: {Email}", email);
-            return null;
-        }
+        try { return await _dbContext.Users.FirstOrDefaultAsync(u => u.Email == email); }
+        catch (Exception ex) { _logger.LogError(ex, "Failed to get user from DB: {Email}", email); return null; }
     }
 
     public async Task<User?> GetUserFromDbByIdAsync(string id)
     {
         try
         {
-            if (!int.TryParse(id, out var intId))
-            {
-                return await _dbContext.Users.FirstOrDefaultAsync(u => u.FirebaseUid == id);
-            }
+            if (!int.TryParse(id, out var intId)) return await _dbContext.Users.FirstOrDefaultAsync(u => u.FirebaseUid == id);
             return await _dbContext.Users.FirstOrDefaultAsync(u => u.Id == intId);
         }
-        catch (Exception ex)
+        catch (Exception ex) { _logger.LogError(ex, "Failed to get user by Id: {Id}", id); return null; }
+    }
+
+    // ========== BOSS NEW: BUYER HISTORY FOR 3 JOBS / 2 JOBS - REAL CODE ==========
+    public async Task<string> CreateBuyerHistoryAsync(string buyerId, string buyerPhone, string buyerName, string businessId, string businessName, string productId, string productName, string productImage, string message, string status)
+    {
+        if (!_firebaseService.IsInitialized) return "";
+        return await ExecuteWithRetryAsync(async () =>
         {
-            _logger.LogError(ex, "Failed to get user by Id: {Id}", id);
-            return null;
-        }
+            var docId = Guid.NewGuid().ToString("N");
+            var data = new Dictionary<string, object>
+            {
+                ["id"] = docId,
+                ["buyerId"] = buyerId ?? "",
+                ["buyerPhone"] = buyerPhone ?? "",
+                ["buyerName"] = buyerName ?? "Buyer",
+                ["businessId"] = businessId ?? "",
+                ["businessName"] = businessName ?? "Irham Trade",
+                ["deviceId"] = productId ?? "",
+                ["productId"] = productId ?? "",
+                ["productName"] = productName ?? "Product",
+                ["productImage"] = productImage ?? "",
+                ["message"] = message ?? "",
+                ["businessResponse"] = message ?? "",
+                ["status"] = status ?? "Pending",
+                ["read"] = false,
+                ["createdAt"] = Timestamp.GetCurrentTimestamp(),
+                ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+            };
+            await Firestore.Collection("buyer_history").Document(docId).SetAsync(data);
+            _logger.LogInformation("BOSS FirestoreService BuyerHistory Created {DocId}", docId);
+            return docId;
+        }, "", $"CreateBuyerHistory {buyerId}");
+    }
+
+    public async Task<List<Dictionary<string, object>>> GetBuyerHistoryAsync(string buyerId)
+    {
+        if (!_firebaseService.IsInitialized) return new();
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            var snap = await Firestore.Collection("buyer_history").WhereEqualTo("buyerId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
+            if (snap.Count == 0) snap = await Firestore.Collection("buyer_history").WhereEqualTo("buyerPhone", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
+            var list = new List<Dictionary<string, object>>();
+            foreach (var doc in snap.Documents) { var dict = doc.ToDictionary(); dict["id"] = doc.Id; list.Add(dict); }
+            return list;
+        }, new List<Dictionary<string, object>>(), $"GetBuyerHistory {buyerId}");
     }
 }

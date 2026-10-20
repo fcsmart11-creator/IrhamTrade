@@ -1,30 +1,153 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using IrhamTrade.Server.Services;
+using IrhamTrade.Server.Data;
+using Microsoft.EntityFrameworkCore;
 
 namespace IrhamTrade.Server.Controllers
 {
-    // Purpose: Auth Controller - Handles register-business, register-buyer, login, forgot-password, reset-password, logout, validate. Returns real FirebaseUid + real name always, like Facebook/TikTok. Never returns fake ID "1".
+    // Purpose: Auth Controller - Professional Facebook standard - Returns real FirebaseUid + real name always, never fake ID "1", includes user-by-email for app fallback + dev-clear-all for fresh testing
     [ApiController]
     [Route("api/[controller]")]
     public class AuthController : ControllerBase
     {
         private readonly AuthService _authService;
+        private readonly AppDbContext _context;
+        private readonly FirebaseService _firebaseService;
         private readonly ILogger<AuthController> _logger;
 
-        public AuthController(AuthService authService, ILogger<AuthController> logger)
+        public AuthController(AuthService authService, AppDbContext context, FirebaseService firebaseService, ILogger<AuthController> logger)
         {
             _authService = authService;
+            _context = context;
+            _firebaseService = firebaseService;
             _logger = logger;
         }
 
-        // Purpose: Status check - verifies auth service running, project irhamtrade-31ca6.
+        // Purpose: Status check - verifies auth service running, project irhamtrade-31ca6
         [HttpGet]
         public IActionResult Status()
         {
             return Ok(new { message = "IrhamTrade Auth service running", project = "irhamtrade-31ca6", ready = true, time = DateTime.UtcNow });
         }
 
-        // Purpose: Register business - validates businessName/email/password, calls AuthService.RegisterBusinessAsync which creates Firebase user + Firestore users/{realId} + SQLite. Returns full profile with real ID, role, businessName, phone, location, token. Never returns "1".
+        // Purpose: Get user by email - CRITICAL for app fallback when real ID missing, returns real ID + real name, blocks fake ID "1"
+        [HttpGet("user-by-email")]
+        public async Task<IActionResult> GetUserByEmail([FromQuery] string email)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(email) || !email.Contains("@"))
+                    return BadRequest(new { success = false, message = "Valid email required" });
+
+                _logger.LogInformation("GetUserByEmail: {Email}", email);
+                var result = await _authService.GetUserByEmailAsync(email.Trim().ToLowerInvariant());
+
+                if (!result.Success || result.User == null)
+                    return NotFound(new { success = false, message = "User not found" });
+
+                if (result.User.Id == "1" || result.User.Id == "2" || result.User.Id.Length < 10)
+                {
+                    _logger.LogError("GetUserByEmail returned bad ID {Id} for {Email} - BLOCKED", result.User.Id, email);
+                    return StatusCode(500, new { success = false, message = "Invalid ID stored - contact support" });
+                }
+
+                return Ok(new
+                {
+                    success = true,
+                    data = new
+                    {
+                        id = result.User.Id,
+                        _id = result.User.Id,
+                        user_id = result.User.Id,
+                        userId = result.User.Id,
+                        firebaseUid = result.User.Id,
+                        businessName = result.User.BusinessName,
+                        fullName = result.User.FullName,
+                        name = !string.IsNullOrWhiteSpace(result.User.BusinessName) ? result.User.BusinessName : result.User.FullName,
+                        email = result.User.Email,
+                        phone = result.User.Phone,
+                        location = result.User.Location,
+                        role = result.User.Role
+                    },
+                    user = result.User
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetUserByEmail error");
+                return StatusCode(500, new { success = false, message = "Server error fetching user" });
+            }
+        }
+
+        // Purpose: DEV ONLY - Clear all data for fresh testing - Clears SQLite + Firestore users + blacklisted tokens, use when you clear Firebase console
+        [HttpDelete("dev-clear-all")]
+        public async Task<IActionResult> DevClearAll([FromQuery] string confirm)
+        {
+            if (confirm != "IRHAM_CLEAR_2026")
+                return BadRequest(new { success = false, message = "Add ?confirm=IRHAM_CLEAR_2026 to clear. Example: DELETE /api/Auth/dev-clear-all?confirm=IRHAM_CLEAR_2026" });
+
+            try
+            {
+                // Clear SQLite Users
+                var users = await _context.Users.ToListAsync();
+                _context.Users.RemoveRange(users);
+
+                // Clear Orders if you have - Uncomment if you have these tables
+                try
+                {
+                    if (_context.GetType().GetProperty("Orders") != null)
+                    {
+                        var orders = await _context.Set<dynamic>().ToListAsync();
+                        // If Orders table exists, clear it - Safe to ignore if not
+                    }
+                }
+                catch { }
+
+                await _context.SaveChangesAsync();
+
+                // Clear Firestore users collection in background
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
+                        {
+                            var snapshot = await _firebaseService.FirestoreDb.Collection("users").GetSnapshotAsync();
+                            foreach (var doc in snapshot.Documents)
+                            {
+                                await doc.Reference.DeleteAsync();
+                            }
+                            _logger.LogWarning("DEV CLEAR - All Firestore users deleted - Count {Count}", snapshot.Count);
+                        }
+                    }
+                    catch (Exception ex) { _logger.LogError(ex, "Dev clear Firestore failed"); }
+                });
+
+                // Clear blacklisted tokens via AuthService
+                await _authService.ClearAllTokensAsync();
+
+                _logger.LogWarning("DEV CLEAR ALL executed - Cleared {Count} users from SQLite", users.Count);
+
+                return Ok(new
+                {
+                    success = true,
+                    message = $"Cleared {users.Count} users from SQLite. Firestore users deleting in background. Now manually clear Firebase Auth users in Firebase Console > Authentication.",
+                    clearedCount = users.Count,
+                    nextSteps = new[] {
+                        "1. Firebase Console > Authentication > Delete all users",
+                        "2. Firebase Console > Firestore > Delete users collection if still there",
+                        "3. Uninstall app from phone > Reinstall > Register fresh - No old data!"
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "DevClearAll failed");
+                return StatusCode(500, new { success = false, message = ex.Message });
+            }
+        }
+
+        // Purpose: Register business - validates businessName/email/password, creates real FirebaseUid, never "1"
         [HttpPost("register-business")]
         public async Task<IActionResult> RegisterBusiness([FromBody] RegisterBusinessRequest req)
         {
@@ -77,7 +200,7 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        // Purpose: Register buyer - validates fullName/email/password, creates buyer account with real FirebaseUid.
+        // Purpose: Register buyer - same logic, role buyer
         [HttpPost("register-buyer")]
         public async Task<IActionResult> RegisterBuyer([FromBody] RegisterBuyerRequest req)
         {
@@ -130,7 +253,7 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        // Purpose: Login - MAIN SECURITY LOGIC like Facebook. Email+password only, returns SAME account with SAME role, SAME real ID, SAME real name, phone, location. No new account created. Validates against SQLite then Firebase fallback to restore real name/ID even if Firestore cleared.
+        // Purpose: Login - Facebook standard - Returns SAME real ID + SAME real name, blocks "1"
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] LoginRequest req)
         {
@@ -150,8 +273,8 @@ namespace IrhamTrade.Server.Controllers
 
                 if (result.User.Id == "1" || result.User.Id == "2" || result.User.Id.Length < 10)
                 {
-                    _logger.LogError("Login returned bad ID {Id} for {Email} - SECURITY BLOCK - Should never happen with fixed AuthService", result.User.Id, req.Email);
-                    return StatusCode(500, new { success = false, message = "Server returned invalid ID. Please contact support - fixed server will give real ID." });
+                    _logger.LogError("Login returned bad ID {Id} for {Email} - SECURITY BLOCK", result.User.Id, req.Email);
+                    return StatusCode(500, new { success = false, message = "Server returned invalid ID. Please contact support." });
                 }
 
                 return Ok(new
@@ -193,7 +316,6 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        // Purpose: Forgot password - validates email, calls AuthService.ForgotPasswordAsync. Returns success message. Security: returns success even if email not found to avoid enumeration (like Facebook).
         [HttpPost("forgot-password")]
         public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest req)
         {
@@ -217,7 +339,6 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        // Purpose: Reset password - validates email and new password length, updates SQLite and Firebase Auth.
         [HttpPost("reset-password")]
         public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest req)
         {
@@ -241,7 +362,6 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        // Purpose: Logout - invalidates JWT token by blacklisting, allows one phone to switch roles cleanly (business -> buyer). Always returns success like Facebook.
         [HttpPost("logout")]
         public async Task<IActionResult> Logout()
         {
@@ -260,7 +380,6 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        // Purpose: Validate token - checks if JWT is blacklisted or expired.
         [HttpGet("validate")]
         public async Task<IActionResult> ValidateToken()
         {

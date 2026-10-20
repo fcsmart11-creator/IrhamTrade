@@ -60,7 +60,6 @@ namespace IrhamTrade.Server.Services
             return key;
         }
 
-        // Purpose: Execute with retry and timeout - prevents 500 if Firestore slow. Facebook standard.
         private async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, T fallback, string opName, int retries = 2)
         {
             for (int attempt = 1; attempt <= retries; attempt++)
@@ -83,23 +82,27 @@ namespace IrhamTrade.Server.Services
             return fallback;
         }
 
-        // Purpose: Validate ID - rejects fake SQL IDs "1","2" and short IDs. Ensures real Firebase UID.
         private static bool IsBadId(string? id) => string.IsNullOrWhiteSpace(id) || id == "1" || id == "2" || id.Length < 10;
 
-        // Purpose: Convert User DB model to AppUser response - FIXED PROFESSIONAL. ALWAYS returns real FirebaseUid, never SQL "1". Returns real BusinessName/FullName, not email prefix.
+        private static bool IsEmailPrefix(string? name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return true;
+            return name.Trim().Contains("@");
+        }
+
         private AppUser ToAppUser(User u)
         {
             var realId = !string.IsNullOrWhiteSpace(u.FirebaseUid) ? u.FirebaseUid : "";
             if (IsBadId(realId))
             {
-                if (!string.IsNullOrWhiteSpace(u.FirebaseUid) && !IsBadId(u.FirebaseUid))
-                    realId = u.FirebaseUid;
-                else
-                    realId = Guid.NewGuid().ToString("N"); // Never return "1" - generate safe Guid as fallback, will be fixed on next login
+                realId = Guid.NewGuid().ToString("N");
             }
 
             var businessName = !string.IsNullOrWhiteSpace(u.BusinessName) ? u.BusinessName.Trim() : "";
             var fullName = !string.IsNullOrWhiteSpace(u.FullName) ? u.FullName.Trim() : "";
+
+            if (IsEmailPrefix(businessName)) businessName = "";
+            if (IsEmailPrefix(fullName)) fullName = "";
 
             if (string.IsNullOrWhiteSpace(businessName) && u.Role == "business" && !string.IsNullOrWhiteSpace(fullName))
                 businessName = fullName;
@@ -118,7 +121,96 @@ namespace IrhamTrade.Server.Services
             };
         }
 
-        // Purpose: Register business - validates inputs, checks duplicate email, creates Firebase user, saves to SQLite, saves to Firestore users/{firebaseUid} ONCE with real ID, returns real FirebaseUid (never "1").
+        public async Task<AuthResult> GetUserByEmailAsync(string email)
+        {
+            try
+            {
+                email = email.Trim().ToLowerInvariant();
+                var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+
+                if (user != null)
+                {
+                    if (IsBadId(user.FirebaseUid) && !IsBadId(user.Id.ToString()))
+                    {
+                        try
+                        {
+                            if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
+                            {
+                                var snap = await _firebaseService.FirestoreDb.Collection("users").WhereEqualTo("email", email).Limit(1).GetSnapshotAsync();
+                                if (snap.Count > 0)
+                                {
+                                    var dict = snap.Documents[0].ToDictionary();
+                                    if (dict.TryGetValue("id", out var idObj) && !IsBadId(idObj?.ToString()))
+                                    {
+                                        user.FirebaseUid = idObj.ToString()!;
+                                        await _context.SaveChangesAsync();
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    var appUser = ToAppUser(user);
+                    appUser.Token = GenerateJwt(user);
+                    if (!IsBadId(user.FirebaseUid))
+                        appUser.Id = user.FirebaseUid;
+
+                    _logger.LogInformation("GetUserByEmail SUCCESS {Email} RealId {Id} Name {Name}", email, appUser.Id, appUser.BusinessName + appUser.FullName);
+                    return new AuthResult { Success = true, Message = "User found", User = appUser };
+                }
+
+                try
+                {
+                    if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
+                    {
+                        var snap = await _firebaseService.FirestoreDb.Collection("users").WhereEqualTo("email", email).Limit(1).GetSnapshotAsync();
+                        if (snap.Count > 0)
+                        {
+                            var doc = snap.Documents[0];
+                            var dict = doc.ToDictionary();
+                            string id = doc.Id;
+                            if (dict.TryGetValue("id", out var idObj) && !IsBadId(idObj?.ToString()))
+                                id = idObj.ToString()!;
+
+                            if (IsBadId(id)) return Fail("Invalid ID stored");
+
+                            string role = dict.TryGetValue("role", out var r) ? r?.ToString() ?? "buyer" : "buyer";
+                            string bName = dict.TryGetValue("businessName", out var bn) ? bn?.ToString() ?? "" : "";
+                            string fName = dict.TryGetValue("fullName", out var fn) ? fn?.ToString() ?? "" : "";
+                            string phone = dict.TryGetValue("phone", out var ph) ? ph?.ToString() ?? "" : "";
+                            string loc = dict.TryGetValue("location", out var l) ? l?.ToString() ?? "Ghana" : "Ghana";
+
+                            if (IsEmailPrefix(bName)) bName = "";
+                            if (IsEmailPrefix(fName)) fName = "";
+
+                            var appUser = new AppUser
+                            {
+                                Id = id,
+                                Role = role,
+                                BusinessName = bName,
+                                FullName = fName,
+                                Phone = phone,
+                                Location = loc,
+                                Email = email,
+                                Token = ""
+                            };
+
+                            return new AuthResult { Success = true, Message = "User found in Firestore", User = appUser };
+                        }
+                    }
+                }
+                catch (Exception ex) { _logger.LogWarning(ex, "GetUserByEmail Firestore fallback failed"); }
+
+                return Fail("User not found");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetUserByEmail error {Email}", email);
+                return Fail("Error fetching user");
+            }
+        }
+
         public async Task<AuthResult> RegisterBusinessAsync(string businessName, string phone, string location, string email, string password)
         {
             if (string.IsNullOrWhiteSpace(businessName)) return Fail("Please enter your business name");
@@ -174,25 +266,26 @@ namespace IrhamTrade.Server.Services
                 _context.Users.Add(user);
                 await _context.SaveChangesAsync();
 
+                var finalDocId = firebaseUid;
+                if (IsBadId(finalDocId))
+                {
+                    finalDocId = Guid.NewGuid().ToString("N");
+                    user.FirebaseUid = finalDocId;
+                    try { await _context.SaveChangesAsync(); } catch { }
+                }
+
                 _ = Task.Run(async () =>
                 {
                     try
                     {
                         if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
                         {
-                            var docId = firebaseUid;
-                            if (string.IsNullOrWhiteSpace(docId) || IsBadId(docId))
-                            {
-                                docId = Guid.NewGuid().ToString("N");
-                                _logger.LogWarning("Firebase UID missing for {Email}, using Guid fallback {DocId}", email, docId);
-                            }
-
                             var data = new Dictionary<string, object>
                             {
-                                { "id", docId },
-                                { "idString", docId },
-                                { "businessId", docId },
-                                { "ownerId", docId },
+                                { "id", finalDocId },
+                                { "idString", finalDocId },
+                                { "businessId", finalDocId },
+                                { "ownerId", finalDocId },
                                 { "firebaseUid", firebaseUid },
                                 { "firebase_uid", firebaseUid },
                                 { "email", email },
@@ -204,8 +297,8 @@ namespace IrhamTrade.Server.Services
                                 { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() },
                                 { "updatedAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
                             };
-                            await _firebaseService.FirestoreDb.Collection("users").Document(docId).SetAsync(data, Google.Cloud.Firestore.SetOptions.MergeAll);
-                            _logger.LogInformation("Business user saved to Firestore users/{DocId} Email {Email} RealId", docId, email);
+                            await _firebaseService.FirestoreDb.Collection("users").Document(finalDocId).SetAsync(data, Google.Cloud.Firestore.SetOptions.MergeAll);
+                            _logger.LogInformation("Business user saved to Firestore users/{DocId} Email {Email} RealId", finalDocId, email);
                         }
                     }
                     catch (Exception ex) { _logger.LogWarning(ex, "Firestore background save failed"); }
@@ -213,8 +306,7 @@ namespace IrhamTrade.Server.Services
 
                 var appUser = ToAppUser(user);
                 appUser.Token = GenerateJwt(user);
-                if (!string.IsNullOrWhiteSpace(firebaseUid) && !IsBadId(firebaseUid))
-                    appUser.Id = firebaseUid;
+                appUser.Id = finalDocId;
 
                 _logger.LogInformation("RegisterBusiness SUCCESS {Email} Role business RealId {RealId} Name {Name} - NEVER 1", email, appUser.Id, appUser.BusinessName);
                 return new AuthResult { Success = true, Message = "Business account created successfully. Welcome to IRHAM TRADE!", User = appUser };
@@ -231,7 +323,6 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // Purpose: Register buyer - same logic as business but role buyer, fullName.
         public async Task<AuthResult> RegisterBuyerAsync(string fullName, string phone, string location, string email, string password)
         {
             if (string.IsNullOrWhiteSpace(fullName)) return Fail("Please enter your full name");
@@ -286,24 +377,26 @@ namespace IrhamTrade.Server.Services
                 _context.Users.Add(user);
                 await _context.SaveChangesAsync();
 
+                var finalDocId = firebaseUid;
+                if (IsBadId(finalDocId))
+                {
+                    finalDocId = Guid.NewGuid().ToString("N");
+                    user.FirebaseUid = finalDocId;
+                    try { await _context.SaveChangesAsync(); } catch { }
+                }
+
                 _ = Task.Run(async () =>
                 {
                     try
                     {
                         if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
                         {
-                            var docId = firebaseUid;
-                            if (string.IsNullOrWhiteSpace(docId) || IsBadId(docId))
-                                docId = Guid.NewGuid().ToString("N");
-
                             var data = new Dictionary<string, object>
                             {
-                                { "id", docId },
-                                { "idString", docId },
-                                { "buyerId", docId },
-                                { "userId", docId },
-                                { "businessId", docId },
-                                { "ownerId", docId },
+                                { "id", finalDocId },
+                                { "idString", finalDocId },
+                                { "buyerId", finalDocId },
+                                { "userId", finalDocId },
                                 { "firebaseUid", firebaseUid },
                                 { "firebase_uid", firebaseUid },
                                 { "email", email },
@@ -315,7 +408,7 @@ namespace IrhamTrade.Server.Services
                                 { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() },
                                 { "updatedAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
                             };
-                            await _firebaseService.FirestoreDb.Collection("users").Document(docId).SetAsync(data, Google.Cloud.Firestore.SetOptions.MergeAll);
+                            await _firebaseService.FirestoreDb.Collection("users").Document(finalDocId).SetAsync(data, Google.Cloud.Firestore.SetOptions.MergeAll);
                         }
                     }
                     catch (Exception ex) { _logger.LogWarning(ex, "Firestore save failed"); }
@@ -323,8 +416,7 @@ namespace IrhamTrade.Server.Services
 
                 var appUser = ToAppUser(user);
                 appUser.Token = GenerateJwt(user);
-                if (!string.IsNullOrWhiteSpace(firebaseUid) && !IsBadId(firebaseUid))
-                    appUser.Id = firebaseUid;
+                appUser.Id = finalDocId;
 
                 _logger.LogInformation("RegisterBuyer SUCCESS {Email} RealId {RealId} Name {Name}", email, appUser.Id, appUser.FullName);
                 return new AuthResult { Success = true, Message = "Buyer account created successfully. Welcome to IRHAM TRADE!", User = appUser };
@@ -341,7 +433,6 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // Purpose: Login - FIXED PROFESSIONAL Facebook standard. Returns SAME real ID and SAME real name as registration, even after 1 year. Tries SQLite first with BCrypt, restores real ID and real name from Firestore if SQLite missing, fallback to Firebase Auth login to get real FirebaseUid + real name from users/{uid}. Never returns "1" or email prefix as name.
         public async Task<AuthResult> LoginAsync(string email, string password)
         {
             if (string.IsNullOrWhiteSpace(email) || !email.Contains("@")) return Fail("Please enter a valid email address");
@@ -383,9 +474,9 @@ namespace IrhamTrade.Server.Services
                                             user.FirebaseUid = appUser.Id;
                                             try { await _context.SaveChangesAsync(); } catch { }
                                         }
-                                        if (dict.TryGetValue("businessName", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString()))
+                                        if (dict.TryGetValue("businessName", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString()) && !IsEmailPrefix(bn?.ToString()))
                                             appUser.BusinessName = bn.ToString()!;
-                                        if (dict.TryGetValue("fullName", out var fn) && !string.IsNullOrWhiteSpace(fn?.ToString()))
+                                        if (dict.TryGetValue("fullName", out var fn) && !string.IsNullOrWhiteSpace(fn?.ToString()) && !IsEmailPrefix(fn?.ToString()))
                                             appUser.FullName = fn.ToString()!;
                                         if (dict.TryGetValue("phone", out var ph) && !string.IsNullOrWhiteSpace(ph?.ToString()))
                                             appUser.Phone = ph.ToString()!;
@@ -427,9 +518,9 @@ namespace IrhamTrade.Server.Services
                                 user.Phone = fbResult.User.Phone;
                             if (string.IsNullOrWhiteSpace(user.Location) && !string.IsNullOrWhiteSpace(fbResult.User.Location))
                                 user.Location = fbResult.User.Location;
-                            if (string.IsNullOrWhiteSpace(user.BusinessName) && !string.IsNullOrWhiteSpace(fbResult.User.BusinessName))
+                            if (string.IsNullOrWhiteSpace(user.BusinessName) && !string.IsNullOrWhiteSpace(fbResult.User.BusinessName) && !IsEmailPrefix(fbResult.User.BusinessName))
                                 user.BusinessName = fbResult.User.BusinessName;
-                            if (string.IsNullOrWhiteSpace(user.FullName) && !string.IsNullOrWhiteSpace(fbResult.User.FullName))
+                            if (string.IsNullOrWhiteSpace(user.FullName) && !string.IsNullOrWhiteSpace(fbResult.User.FullName) && !IsEmailPrefix(fbResult.User.FullName))
                                 user.FullName = fbResult.User.FullName;
 
                             await _context.SaveChangesAsync();
@@ -452,13 +543,24 @@ namespace IrhamTrade.Server.Services
                         try
                         {
                             var role = fbResult.User.Role ?? "buyer";
+                            var safeFullName = !string.IsNullOrWhiteSpace(fbResult.User.FullName) && !IsEmailPrefix(fbResult.User.FullName) ? fbResult.User.FullName : "";
+                            var safeBusinessName = !string.IsNullOrWhiteSpace(fbResult.User.BusinessName) && !IsEmailPrefix(fbResult.User.BusinessName) ? fbResult.User.BusinessName : "";
+
+                            if (string.IsNullOrWhiteSpace(safeFullName) && !string.IsNullOrWhiteSpace(safeBusinessName))
+                                safeFullName = safeBusinessName;
+                            if (string.IsNullOrWhiteSpace(safeBusinessName) && role == "business" && !string.IsNullOrWhiteSpace(safeFullName))
+                                safeBusinessName = safeFullName;
+
+                            if (string.IsNullOrWhiteSpace(safeFullName))
+                                safeFullName = "User";
+
                             var newUser = new User
                             {
                                 Email = email,
                                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(password),
                                 Role = role.ToLowerInvariant(),
-                                FullName = !string.IsNullOrWhiteSpace(fbResult.User.FullName) ? fbResult.User.FullName : (!string.IsNullOrWhiteSpace(fbResult.User.BusinessName) ? fbResult.User.BusinessName : email.Split('@')[0]),
-                                BusinessName = !string.IsNullOrWhiteSpace(fbResult.User.BusinessName) ? fbResult.User.BusinessName : (role == "business" ? fbResult.User.FullName ?? "" : ""),
+                                FullName = safeFullName,
+                                BusinessName = safeBusinessName,
                                 Phone = fbResult.User.Phone ?? "",
                                 Location = fbResult.User.Location ?? "Ghana",
                                 FirebaseUid = fbResult.User.Id ?? "",
@@ -491,7 +593,6 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // Purpose: Firebase login fallback - uses Firebase IdentityToolkit API to get real Firebase UID, then fetches real name/role/phone/location from Firestore users/{uid}. Returns real ID + real name, never email prefix.
         private async Task<AuthResult> TryFirebaseLoginAsync(string email, string password)
         {
             try
@@ -540,8 +641,8 @@ namespace IrhamTrade.Server.Services
                         {
                             var dict = snap.ToDictionary();
                             if (dict.TryGetValue("role", out var r) && !string.IsNullOrWhiteSpace(r?.ToString())) role = r?.ToString() ?? role;
-                            if (dict.TryGetValue("fullName", out var fn) && !string.IsNullOrWhiteSpace(fn?.ToString())) fullName = fn!.ToString()!.Trim();
-                            if (dict.TryGetValue("businessName", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString())) businessName = bn!.ToString()!.Trim();
+                            if (dict.TryGetValue("fullName", out var fn) && !string.IsNullOrWhiteSpace(fn?.ToString()) && !IsEmailPrefix(fn?.ToString())) fullName = fn!.ToString()!.Trim();
+                            if (dict.TryGetValue("businessName", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString()) && !IsEmailPrefix(bn?.ToString())) businessName = bn!.ToString()!.Trim();
                             if (dict.TryGetValue("phone", out var ph) && !string.IsNullOrWhiteSpace(ph?.ToString())) phone = ph?.ToString() ?? "";
                             if (dict.TryGetValue("location", out var loc) && !string.IsNullOrWhiteSpace(loc?.ToString())) location = loc?.ToString() ?? location;
 
@@ -554,10 +655,8 @@ namespace IrhamTrade.Server.Services
 
                 if (string.IsNullOrWhiteSpace(fullName) && string.IsNullOrWhiteSpace(businessName))
                 {
-                    if (!string.IsNullOrWhiteSpace(displayName))
+                    if (!string.IsNullOrWhiteSpace(displayName) && !IsEmailPrefix(displayName))
                         fullName = displayName.Trim();
-                    else
-                        fullName = email.Split('@')[0]; // Last fallback only
                 }
 
                 var appUser = new AppUser
@@ -572,7 +671,7 @@ namespace IrhamTrade.Server.Services
                     Token = ""
                 };
 
-                _logger.LogInformation("Firebase login SUCCESS {Email} UID {Uid} Role {Role} Name {Name} - SAME AS REGISTER - REAL ID NEVER 1", email, uid, role, fullName + businessName);
+                _logger.LogInformation("Firebase login SUCCESS {Email} UID {Uid} Role {Role} Name {Name} - REAL ID NEVER 1", email, uid, role, fullName + businessName);
                 return new AuthResult { Success = true, Message = "Login successful via Firebase", User = appUser };
             }
             catch (Exception ex)
@@ -636,7 +735,6 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // Purpose: Logout - blacklists JWT token to prevent reuse.
         public async Task LogoutAsync(string token)
         {
             try
@@ -665,13 +763,24 @@ namespace IrhamTrade.Server.Services
             catch { return false; }
         }
 
+        // BOSS FIX: Added for dev-clear-all endpoint - Clears all blacklisted tokens
+        public async Task ClearAllTokensAsync()
+        {
+            try
+            {
+                _blacklistedTokens.Clear();
+                _logger.LogWarning("All blacklisted tokens cleared for dev fresh test");
+                await Task.CompletedTask;
+            }
+            catch { }
+        }
+
         private DateTime? GetTokenExpiry(string token)
         {
             try { var handler = new JwtSecurityTokenHandler(); var jwt = handler.ReadJwtToken(token); return jwt.ValidTo; }
             catch { return null; }
         }
 
-        // Purpose: Generate JWT - Sub is REAL FirebaseUid, never SQL "1". Contains role, businessName, fullName, phone, location. Same ID always, like Facebook.
         private string GenerateJwt(User user)
         {
             var key = GetJwtKey();

@@ -55,6 +55,8 @@ public class FirestoreService
         return fallback;
     }
 
+    private static bool IsBadId(string? id) => string.IsNullOrWhiteSpace(id) || id == "1" || id == "2" || id.Length < 10;
+
     // Purpose: Save business user to Firestore users collection. Generates valid docId if FirebaseUid bad (1,2,<10). MergeAll to avoid overwrite.
     public async Task<bool> SaveUserToFirestoreAsync(User user)
     {
@@ -219,10 +221,11 @@ public class FirestoreService
         catch (Exception ex) { _logger.LogError(ex, "Failed to get user by Id: {Id}", id); return null; }
     }
 
-    // Purpose: Create buyer_history for Accept/Decline - 3 JOBS / 2 JOBS real code. Stores message with status successful/failed for buyer notification.
+    // BOSS FIX PROFESSIONAL: Create buyer_history now saves buyerId + userId + buyerPhone - Ensures fresh account logic - New UID xyz789 = Empty Fresh!
     public async Task<string> CreateBuyerHistoryAsync(string buyerId, string buyerPhone, string buyerName, string businessId, string businessName, string productId, string productName, string productImage, string message, string status)
     {
         if (!_firebaseService.IsInitialized) return "";
+        if (IsBadId(buyerId)) return "";
         return await ExecuteWithRetryAsync(async () =>
         {
             var docId = Guid.NewGuid().ToString("N");
@@ -230,6 +233,7 @@ public class FirestoreService
             {
                 ["id"] = docId,
                 ["buyerId"] = buyerId ?? "",
+                ["userId"] = buyerId ?? "",
                 ["buyerPhone"] = buyerPhone ?? "",
                 ["buyerName"] = buyerName ?? "Buyer",
                 ["businessId"] = businessId ?? "",
@@ -247,19 +251,27 @@ public class FirestoreService
                 ["updatedAt"] = Timestamp.GetCurrentTimestamp()
             };
             await Firestore.Collection("buyer_history").Document(docId).SetAsync(data);
-            _logger.LogInformation("BOSS FirestoreService BuyerHistory Created {DocId} for buyer {Buyer} status {Status}", docId, buyerId, status);
+            _logger.LogInformation("BOSS FirestoreService BuyerHistory Created {DocId} for buyer {Buyer} status {Status} - New UID fresh", docId, buyerId, status);
             return docId;
         }, "", $"CreateBuyerHistory {buyerId}");
     }
 
-    // Purpose: Get buyer history by buyerId or buyerPhone fallback, ordered DESC. Used by buyer Interests button.
+    // BOSS FIX PROFESSIONAL: Get buyer history by buyerId ONLY - No phone fallback leak - New UID xyz789 = Empty Fresh! Old UID abc123 login = Full history Restore! Facebook standard!
     public async Task<List<Dictionary<string, object>>> GetBuyerHistoryAsync(string buyerId)
     {
         if (!_firebaseService.IsInitialized) return new();
+        if (IsBadId(buyerId)) return new();
         return await ExecuteWithRetryAsync(async () =>
         {
+            // PROFESSIONAL: Query only by buyerId - Ensures new account with same phone gets fresh empty history
             var snap = await Firestore.Collection("buyer_history").WhereEqualTo("buyerId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
-            if (snap.Count == 0) snap = await Firestore.Collection("buyer_history").WhereEqualTo("buyerPhone", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
+            if (snap.Count == 0)
+            {
+                // Try userId field for backward compatibility
+                snap = await Firestore.Collection("buyer_history").WhereEqualTo("userId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
+            }
+            // DO NOT fallback to buyerPhone - That would leak old accounts! New UID must be fresh!
+            _logger.LogInformation("BOSS GetBuyerHistory FirestoreService buyerId {BuyerId} count {Count} - Fresh if 0 for new UID, Restore if >0 for login", buyerId, snap.Count);
             var list = new List<Dictionary<string, object>>();
             foreach (var doc in snap.Documents) { var dict = doc.ToDictionary(); dict["id"] = doc.Id; list.Add(dict); }
             return list;

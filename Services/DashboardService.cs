@@ -237,14 +237,104 @@ namespace IrhamTrade.Server.Services
         {
             return await ExecuteWithRetryAsync(async () =>
             {
-                var snap = await _db.Collection("interests").Document(interestId).GetSnapshotAsync(); if (!snap.Exists) throw new ArgumentException($"Order {interestId} not found");
-                var data = snap.ToDictionary(); var buyerId = GetString(data, "buyerId"); var buyerPhone = GetString(data, "buyerPhone"); var buyerName = GetString(data, "buyerName"); var bId = GetString(data, "businessId"); if (string.IsNullOrWhiteSpace(bId)) bId = GetString(data, "ownerId"); var productId = GetString(data, "productId"); if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "deviceId"); var productName = GetString(data, "productName"); if (string.IsNullOrWhiteSpace(productName)) productName = GetString(data, "name"); var productImageFromInterest = GetString(data, "productImage"); if (string.IsNullOrWhiteSpace(productImageFromInterest)) productImageFromInterest = GetString(data, "imageBase64"); var price = GetString(data, "price"); var brand = GetString(data, "brand"); var buyerLocation = GetString(data, "buyerLocation");
-                string realImage = productImageFromInterest; try { if (!string.IsNullOrWhiteSpace(productId)) { var deviceSnap = await _db.Collection("devices").Document(productId).GetSnapshotAsync(); if (deviceSnap.Exists) { var deviceData = deviceSnap.ToDictionary(); var img1 = GetString(deviceData, "imageBase64"); var img2 = GetString(deviceData, "imageUrl"); if (!string.IsNullOrWhiteSpace(img1) && img1.Length > 20) realImage = img1; else if (!string.IsNullOrWhiteSpace(img2) && img2.Length > 20) realImage = img2; } } } catch { }
-                try { var acceptMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: We will get in touch with you soon. Please wait for our call or WhatsApp message."; await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, realImage, acceptMsg, "Successful"); } catch (Exception ex) { _logger.LogWarning(ex, "Accept JOB 1 failed"); }
-                var transData = new Dictionary<string, object>(data) { ["transactionStatus"] = "Successful", ["status"] = "Successful", ["businessName"] = string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName, ["completedAt"] = Timestamp.GetCurrentTimestamp(), ["updatedAt"] = Timestamp.GetCurrentTimestamp(), ["productName"] = productName, ["price"] = price, ["brand"] = brand, ["buyerName"] = buyerName, ["buyerPhone"] = buyerPhone, ["buyerLocation"] = buyerLocation, ["productImage"] = realImage, ["imageBase64"] = realImage }; var transDoc = await _db.Collection("transactions").AddAsync(transData);
-                try { if (!string.IsNullOrWhiteSpace(productId)) await _db.Collection("devices").Document(productId).DeleteAsync(); } catch { }
-                try { await _db.Collection("interests").Document(interestId).DeleteAsync(); } catch { try { await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Successful", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll); } catch { } }
-                return transDoc.Id;
+                var snap = await _db.Collection("interests").Document(interestId).GetSnapshotAsync();
+                if (!snap.Exists) throw new Exception($"Interest {interestId} not found");
+                var data = snap.ToDictionary();
+
+                // BOSS FIX - Get buyer info from interest data - Ensure buyerId exists
+                var buyerId = GetString(data, "buyerId");
+                if (string.IsNullOrWhiteSpace(buyerId)) buyerId = GetString(data, "userId");
+                if (string.IsNullOrWhiteSpace(buyerId)) buyerId = GetString(data, "buyerPhone");
+                var buyerPhone = GetString(data, "buyerPhone");
+                var buyerName = GetString(data, "buyerName");
+                if (string.IsNullOrWhiteSpace(buyerName)) buyerName = GetString(data, "fullName");
+
+                var productId = GetString(data, "productId");
+                if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "deviceId");
+                var productName = GetString(data, "productName");
+                var productImage = GetString(data, "productImage");
+                if (string.IsNullOrWhiteSpace(productImage)) productImage = GetString(data, "imageBase64");
+                var price = GetString(data, "price");
+                var ownerId = GetString(data, "ownerId");
+                if (string.IsNullOrWhiteSpace(ownerId)) ownerId = GetString(data, "businessId");
+
+                string realImage = productImage;
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(productId))
+                    {
+                        var prodSnap = await _db.Collection("devices").Document(productId).GetSnapshotAsync();
+                        if (prodSnap.Exists)
+                        {
+                            var prodData = prodSnap.ToDictionary();
+                            var img = GetString(prodData, "imageBase64");
+                            if (!string.IsNullOrWhiteSpace(img)) realImage = img;
+                        }
+                    }
+                }
+                catch { }
+
+                var acceptMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)} accepted your order. We will get in touch with you soon. Your order has been accepted.";
+
+                // BOSS FIX - Build flat data with buyerId, userId, buyerPhone - For Buyer History query
+                var transId = Guid.NewGuid().ToString("N").Substring(0, 20);
+                var now = Timestamp.GetCurrentTimestamp();
+
+                var transData = new Dictionary<string, object>(data)
+                {
+                    ["id"] = transId,
+                    ["transactionId"] = transId,
+                    ["productId"] = productId,
+                    ["deviceId"] = productId,
+                    ["productName"] = productName,
+                    ["productImage"] = realImage,
+                    ["imageBase64"] = realImage,
+                    ["price"] = price,
+                    ["ownerId"] = ownerId,
+                    ["businessId"] = ownerId,
+                    // BOSS IMPORTANT - These 4 fields make Buyer History work
+                    ["buyerId"] = buyerId,
+                    ["userId"] = buyerId,
+                    ["buyerPhone"] = buyerPhone,
+                    ["buyerName"] = buyerName,
+                    ["status"] = "Successful",
+                    ["transactionStatus"] = "Successful",
+                    ["response"] = acceptMsg,
+                    ["message"] = acceptMsg,
+                    ["createdAt"] = now,
+                    ["updatedAt"] = now,
+                    ["acceptedAt"] = now,
+                    ["businessName"] = businessName
+                };
+
+                // BOSS FIX - Write to 3 FLAT collections - No sub-collection - No ghost doc 0537842357
+                var transDocRef = _db.Collection("transactions").Document(transId);
+                await transDocRef.SetAsync(transData);
+
+                var buyerHistoryRef = _db.Collection("buyer_history").Document(transId);
+                await buyerHistoryRef.SetAsync(transData);
+
+                var buyerTransRef = _db.Collection("buyer_transactions").Document(transId);
+                await buyerTransRef.SetAsync(transData);
+
+                // Optional - Update product status if needed
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(productId))
+                    {
+                        await _db.Collection("devices").Document(productId).UpdateAsync(new Dictionary<string, object>
+                        {
+                            ["status"] = "Sold",
+                            ["transactionId"] = transId
+                        });
+                    }
+                }
+                catch { }
+
+                // Delete interest after successful write
+                await _db.Collection("interests").Document(interestId).DeleteAsync();
+
+                return transId;
             }, null!, $"Accept {interestId}");
         }
 
@@ -252,12 +342,31 @@ namespace IrhamTrade.Server.Services
         {
             return await ExecuteWithRetryAsync(async () =>
             {
-                var snap = await _db.Collection("interests").Document(interestId).GetSnapshotAsync(); if (!snap.Exists) return false; var data = snap.ToDictionary(); var buyerId = GetString(data, "buyerId"); var buyerPhone = GetString(data, "buyerPhone"); var buyerName = GetString(data, "buyerName"); var bId = GetString(data, "businessId"); if (string.IsNullOrWhiteSpace(bId)) bId = GetString(data, "ownerId"); var productId = GetString(data, "productId"); if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "deviceId"); var productName = GetString(data, "productName"); var productImage = GetString(data, "productImage"); if (string.IsNullOrWhiteSpace(productImage)) productImage = GetString(data, "imageBase64"); string realImage = productImage; try { if (!string.IsNullOrWhiteSpace(productId)) { var deviceSnap = await _db.Collection("devices").Document(productId).GetSnapshotAsync(); if (deviceSnap.Exists) { var deviceData = deviceSnap.ToDictionary(); var img1 = GetString(deviceData, "imageBase64"); var img2 = GetString(deviceData, "imageUrl"); if (!string.IsNullOrWhiteSpace(img1) && img1.Length > 20) realImage = img1; else if (!string.IsNullOrWhiteSpace(img2) && img2.Length > 20) realImage = img2; } } } catch { }
-                try { var declineMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: Sorry, this product is no longer available. Thank you."; await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, realImage, declineMsg, "Failed"); } catch (Exception ex) { _logger.LogWarning(ex, "Decline JOB 1 failed"); }
-                try { await _db.Collection("interests").Document(interestId).DeleteAsync(); } catch { try { await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Failed", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp(), ["businessResponse"] = "Sorry, this product is no longer available" }, SetOptions.MergeAll); } catch { } }
+                var snap = await _db.Collection("interests").Document(interestId).GetSnapshotAsync();
+                if (!snap.Exists) return true;
+                var data = snap.ToDictionary();
+
+                try
+                {
+                    var declineMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)} declined your order. Product is live again.";
+                    data["response"] = declineMsg;
+                    data["status"] = "Failed";
+                    data["declinedAt"] = Timestamp.GetCurrentTimestamp();
+                    // Make product live again
+                    var productId = GetString(data, "productId");
+                    if (!string.IsNullOrWhiteSpace(productId))
+                    {
+                        await _db.Collection("devices").Document(productId).UpdateAsync(new Dictionary<string, object> { ["status"] = "Available" });
+                    }
+                }
+                catch { }
+
+                await _db.Collection("interests").Document(interestId).DeleteAsync();
                 return true;
             }, false, $"Decline {interestId}");
         }
+
+       
 
         public async Task<List<Dictionary<string, object>>> GetTransactionsByBusinessAsync(string businessId) => await ExecuteWithRetryAsync(async () => { var snap = await _db.Collection("transactions").WhereEqualTo("businessId", businessId).GetSnapshotAsync(); return snap.Documents.Select(d => SanitizeTransaction(d.ToDictionary(), d.Id)).ToList(); }, new List<Dictionary<string, object>>(), $"GetTrans {businessId}");
         public async Task<bool> CompleteTransactionAsync(string transactionId) => await ExecuteWithRetryAsync(async () => { await _db.Collection("transactions").Document(transactionId).DeleteAsync(); return true; }, false, $"Complete {transactionId}");

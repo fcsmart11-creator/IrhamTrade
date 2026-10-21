@@ -111,9 +111,8 @@ namespace IrhamTrade.Server.Services
             return clean;
         }
 
-        private static bool IsBadId(string? id) => string.IsNullOrWhiteSpace(id) || id == "1" || id == "2" || id.Length < 10;
+        private static bool IsBadId(string? id) => string.IsNullOrWhiteSpace(id) || id == "1" || id == "2" || id.Length < 10 || id.Contains("@") || id.Contains(".com");
 
-        // Purpose: Create buyer_history entry - notifies buyer of accept/decline - BOSS FIX: Also saves userId field for composite query - Ensures fresh account logic
         public async Task<string> CreateBuyerHistoryAsync(string buyerId, string buyerPhone, string buyerName, string businessId, string businessName, string productId, string productName, string productImage, string message, string status)
         {
             return await ExecuteWithRetryAsync(async () =>
@@ -141,41 +140,33 @@ namespace IrhamTrade.Server.Services
                     ["updatedAt"] = Timestamp.GetCurrentTimestamp()
                 };
                 await _db.Collection("buyer_history").Document(docId).SetAsync(data);
-                _logger.LogInformation("BOSS BuyerHistory Created {DocId} buyer {Buyer} status {Status} - New UID fresh logic", docId, buyerId, status);
+                _logger.LogInformation("BuyerHistory Created {DocId} buyer {Buyer} status {Status}", docId, buyerId, status);
                 return docId;
             }, "", $"CreateBuyerHistory {buyerId}");
         }
 
-        // BOSS FIX PROFESSIONAL: Get buyer history by buyerId ONLY - No phone fallback - New UID xyz789 = Empty = Fresh! Old UID abc123 login = Full history = Restore! Facebook standard!
         public async Task<List<Dictionary<string, object>>> GetBuyerHistoryAsync(string buyerId)
         {
             if (IsBadId(buyerId)) return new List<Dictionary<string, object>>();
             return await ExecuteWithRetryAsync(async () =>
             {
-                // PROFESSIONAL: Query only by buyerId - Ensures new account with same phone gets fresh empty history
                 var snap = await _db.Collection("buyer_history").WhereEqualTo("buyerId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
                 if (snap.Count == 0)
                 {
-                    // Try userId field for backward compatibility (old docs might have userId not buyerId)
                     snap = await _db.Collection("buyer_history").WhereEqualTo("userId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
                 }
-                // DO NOT fallback to buyerPhone - That would leak old accounts with same phone! New UID must be fresh!
-                // If snap still empty, return empty = Fresh account - Professional!
-                _logger.LogInformation("BOSS GetBuyerHistory buyerId {BuyerId} count {Count} - Fresh if 0, Restore if >0", buyerId, snap.Count);
+                _logger.LogInformation("GetBuyerHistory buyerId {BuyerId} count {Count}", buyerId, snap.Count);
                 return snap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)).ToList();
             }, new List<Dictionary<string, object>>(), $"GetBuyerHistory {buyerId}");
         }
 
-        // BOSS FIX: Separate method for phone query only if explicitly needed - But not used for main history - Keeps fresh logic
         public async Task<List<Dictionary<string, object>>> GetBuyerHistoryByPhoneAsync(string buyerPhone, string? buyerId = null)
         {
             if (string.IsNullOrWhiteSpace(buyerPhone)) return new List<Dictionary<string, object>>();
-            // If buyerId provided and valid, enforce buyerId filter for fresh logic
             if (!IsBadId(buyerId))
             {
                 return await GetBuyerHistoryAsync(buyerId!);
             }
-            // Only if buyerId not provided (legacy call), fallback to phone - But new code should always pass buyerId
             return await ExecuteWithRetryAsync(async () =>
             {
                 var snap = await _db.Collection("buyer_history").WhereEqualTo("buyerPhone", buyerPhone).OrderByDescending("createdAt").Limit(50).GetSnapshotAsync();
@@ -292,8 +283,6 @@ namespace IrhamTrade.Server.Services
                 if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "deviceId");
                 if (string.IsNullOrWhiteSpace(productId)) productId = GetString(data, "id");
 
-                _logger.LogInformation("BOSS CreateInterest START buyer={Buyer} device={Device} business={Business}", buyerId, productId, businessId);
-
                 string fetchedBusinessId = "";
                 string realImage = GetString(data, "productImage");
                 if (string.IsNullOrWhiteSpace(realImage)) realImage = GetString(data, "imageBase64");
@@ -315,8 +304,6 @@ namespace IrhamTrade.Server.Services
                             if (!string.IsNullOrWhiteSpace(img1) && img1.Length > 20) realImage = img1;
                             else if (!string.IsNullOrWhiteSpace(img2) && img2.Length > 20) realImage = img2;
                             else if (!string.IsNullOrWhiteSpace(img3) && img3.Length > 20) realImage = img3;
-
-                            _logger.LogInformation("BOSS CreateInterest FETCHED IMAGE len {Len} business {Biz}", realImage?.Length ?? 0, fetchedBusinessId);
                         }
                     }
                     catch (Exception ex) { _logger.LogWarning(ex, "Fetch device failed {Device}", productId); }
@@ -362,12 +349,11 @@ namespace IrhamTrade.Server.Services
                 };
 
                 var doc = await _db.Collection("interests").AddAsync(cleanData);
-                _logger.LogInformation("BOSS Interest SUCCESS {InterestId} with image len {Len}", doc.Id, realImage?.Length ?? 0);
                 return doc.Id;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "BOSS CreateInterest FAILED");
+                _logger.LogError(ex, "CreateInterest FAILED");
                 throw;
             }
         }
@@ -450,19 +436,17 @@ namespace IrhamTrade.Server.Services
                             if (!string.IsNullOrWhiteSpace(img1) && img1.Length > 20) realImage = img1;
                             else if (!string.IsNullOrWhiteSpace(img2) && img2.Length > 20) realImage = img2;
                             else if (!string.IsNullOrWhiteSpace(img3) && img3.Length > 20) realImage = img3;
-                            _logger.LogInformation("BOSS Accept FETCHED IMAGE len {Len} for device {Device}", realImage?.Length ?? 0, productId);
                         }
                     }
                 }
-                catch (Exception ex) { _logger.LogWarning(ex, "BOSS Fetch device image failed {Device}", productId); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Fetch device image failed {Device}", productId); }
 
                 try
                 {
                     var acceptMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: We will get in touch with you soon. Please wait for our call or WhatsApp message.";
                     await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, realImage, acceptMsg, "successful");
-                    _logger.LogInformation("BOSS Accept JOB 1 DONE - BuyerHistory created");
                 }
-                catch (Exception ex) { _logger.LogWarning(ex, "BOSS Accept JOB 1 failed but continue"); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Accept JOB 1 failed but continue"); }
 
                 var transData = new Dictionary<string, object>(data)
                 {
@@ -482,24 +466,25 @@ namespace IrhamTrade.Server.Services
                     ["imageUrl"] = realImage
                 };
                 var transDoc = await _db.Collection("transactions").AddAsync(transData);
-                _logger.LogInformation("BOSS Accept JOB 2 DONE - Transaction {TransId} with image len {Len}", transDoc.Id, realImage?.Length ?? 0);
 
                 try
                 {
                     if (!string.IsNullOrWhiteSpace(productId))
                     {
                         await _db.Collection("devices").Document(productId).DeleteAsync();
-                        _logger.LogInformation("BOSS Accept JOB 3 DONE - Device {Device} deleted from store (SOLD forever)", productId);
                     }
                 }
-                catch (Exception ex) { _logger.LogWarning(ex, "BOSS Accept JOB 3 delete device failed"); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Delete device failed"); }
 
                 try
                 {
                     await _db.Collection("interests").Document(interestId).DeleteAsync();
-                    _logger.LogInformation("BOSS Accept JOB 4 DONE - Interest {InterestId} DELETED forever - will never return on re-login", interestId);
                 }
-                catch (Exception ex) { _logger.LogWarning(ex, "BOSS Accept JOB 4 delete interest failed, trying mark Successful as fallback"); try { await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Successful", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll); } catch { } }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Delete interest failed, trying mark Successful as fallback");
+                    try { await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Successful", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll); } catch { }
+                }
 
                 return transDoc.Id;
             }, null!, $"Accept {interestId}");
@@ -548,16 +533,14 @@ namespace IrhamTrade.Server.Services
                 {
                     var declineMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: Sorry, this product is no longer available. Thank you.";
                     await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, realImage, declineMsg, "failed");
-                    _logger.LogInformation("BOSS Decline JOB 1 DONE - BuyerHistory failed message");
                 }
-                catch (Exception ex) { _logger.LogWarning(ex, "BOSS Decline JOB 1 failed"); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Decline JOB 1 failed"); }
 
                 try
                 {
                     await _db.Collection("interests").Document(interestId).DeleteAsync();
-                    _logger.LogInformation("BOSS Decline JOB 2 DONE - Interest {InterestId} DELETED forever - will never return", interestId);
                 }
-                catch (Exception ex) { _logger.LogWarning(ex, "BOSS Decline JOB 2 delete failed, marking Failed as fallback"); try { await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Failed", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp(), ["businessResponse"] = "Sorry, this product is no longer available" }, SetOptions.MergeAll); } catch { } }
+                catch (Exception ex) { _logger.LogWarning(ex, "Decline delete failed"); try { await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Failed", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp(), ["businessResponse"] = "Sorry, this product is no longer available" }, SetOptions.MergeAll); } catch { } }
 
                 return true;
             }, false, $"Decline {interestId}");
@@ -610,7 +593,6 @@ namespace IrhamTrade.Server.Services
             };
             await _db.Collection("devices").Document(newId).SetAsync(newDevice);
             await _db.Collection("transactions").Document(transactionId).DeleteAsync();
-            _logger.LogInformation("BOSS Incomplete DONE - Device republished {NewId} from transaction {TransId}", newId, transactionId);
             return true;
         }, false, $"Incomplete {transactionId}");
 

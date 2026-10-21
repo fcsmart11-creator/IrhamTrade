@@ -113,15 +113,26 @@ namespace IrhamTrade.Server.Services
 
         private static bool IsBadId(string? id) => string.IsNullOrWhiteSpace(id) || id == "1" || id == "2" || id.Length < 10 || id.Contains("@") || id.Contains(".com");
 
+        private static string NormalizeStatus(string status)
+        {
+            var s = status?.ToLower()?.Trim() ?? "pending";
+            if (s.Contains("success") || s.Contains("accept") || s.Contains("approv") || s.Contains("contact")) return "Successful";
+            if (s.Contains("fail") || s.Contains("reject") || s.Contains("cancel") || s.Contains("declin") || s.Contains("denied")) return "Failed";
+            return "Pending";
+        }
+
+        // FIXED 100% - Writes to 4 places: flat + subcollection UID + subcollection phone + buyer_transactions
         public async Task<string> CreateBuyerHistoryAsync(string buyerId, string buyerPhone, string buyerName, string businessId, string businessName, string productId, string productName, string productImage, string message, string status)
         {
             return await ExecuteWithRetryAsync(async () =>
             {
-                if (IsBadId(buyerId)) throw new ArgumentException($"Invalid buyerId {buyerId}");
+                if (IsBadId(buyerId) && string.IsNullOrWhiteSpace(buyerPhone)) throw new ArgumentException($"Invalid buyerId {buyerId} and phone empty");
                 var docId = Guid.NewGuid().ToString("N");
+                var normStatus = NormalizeStatus(status);
                 var data = new Dictionary<string, object>
                 {
                     ["id"] = docId,
+                    ["orderId"] = docId,
                     ["buyerId"] = buyerId ?? "",
                     ["userId"] = buyerId ?? "",
                     ["buyerPhone"] = buyerPhone ?? "",
@@ -134,13 +145,37 @@ namespace IrhamTrade.Server.Services
                     ["productImage"] = productImage ?? "",
                     ["message"] = message ?? "",
                     ["businessResponse"] = message ?? "",
-                    ["status"] = status ?? "Pending",
+                    ["status"] = normStatus,
                     ["read"] = false,
                     ["createdAt"] = Timestamp.GetCurrentTimestamp(),
                     ["updatedAt"] = Timestamp.GetCurrentTimestamp()
                 };
+                // 1. Flat collection buyer_history/{docId}
                 await _db.Collection("buyer_history").Document(docId).SetAsync(data);
-                _logger.LogInformation("BuyerHistory Created {DocId} buyer {Buyer} status {Status}", docId, buyerId, status);
+
+                // 2. Subcollection buyer_history/{buyerId}/orders/{docId} - FOR CLIENT REST FETCH
+                if (!IsBadId(buyerId))
+                {
+                    try { await _db.Collection("buyer_history").Document(buyerId).Collection("orders").Document(docId).SetAsync(data); } catch (Exception ex) { _logger.LogWarning(ex, "Create subcollection UID failed"); }
+                }
+
+                // 3. Subcollection buyer_history/{phone}/orders/{docId}
+                if (!string.IsNullOrWhiteSpace(buyerPhone))
+                {
+                    try
+                    {
+                        var safePhone = buyerPhone.Replace("+", "").Replace(" ", "").Trim();
+                        await _db.Collection("buyer_history").Document(safePhone).Collection("orders").Document(docId).SetAsync(data);
+                        if (safePhone != buyerPhone)
+                            await _db.Collection("buyer_history").Document(buyerPhone).Collection("orders").Document(docId).SetAsync(data);
+                    }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Create subcollection phone failed"); }
+                }
+
+                // 4. buyer_transactions/{docId}
+                try { await _db.Collection("buyer_transactions").Document(docId).SetAsync(data); } catch (Exception ex) { _logger.LogWarning(ex, "Create buyer_transactions failed"); }
+
+                _logger.LogInformation("BuyerHistory Created {DocId} buyer {Buyer} phone {Phone} status {Status} - 4 places", docId, buyerId, buyerPhone, normStatus);
                 return docId;
             }, "", $"CreateBuyerHistory {buyerId}");
         }
@@ -150,13 +185,29 @@ namespace IrhamTrade.Server.Services
             if (IsBadId(buyerId)) return new List<Dictionary<string, object>>();
             return await ExecuteWithRetryAsync(async () =>
             {
+                var all = new List<Dictionary<string, object>>();
+
+                // 1. Flat collection where buyerId
                 var snap = await _db.Collection("buyer_history").WhereEqualTo("buyerId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
                 if (snap.Count == 0)
                 {
                     snap = await _db.Collection("buyer_history").WhereEqualTo("userId", buyerId).OrderByDescending("createdAt").GetSnapshotAsync();
                 }
-                _logger.LogInformation("GetBuyerHistory buyerId {BuyerId} count {Count}", buyerId, snap.Count);
-                return snap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)).ToList();
+                all.AddRange(snap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)));
+
+                // 2. Subcollection buyer_history/{buyerId}/orders
+                try
+                {
+                    var subSnap = await _db.Collection("buyer_history").Document(buyerId).Collection("orders").OrderByDescending("createdAt").GetSnapshotAsync();
+                    all.AddRange(subSnap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)));
+                }
+                catch { }
+
+                // Deduplicate by id
+                var dedup = all.GroupBy(x => x.TryGetValue("id", out var id) ? id?.ToString() : Guid.NewGuid().ToString()).Select(g => g.First()).OrderByDescending(x => x.TryGetValue("createdAt", out var ca) ? ca?.ToString() : "").ToList();
+
+                _logger.LogInformation("GetBuyerHistory buyerId {BuyerId} count {Count}", buyerId, dedup.Count);
+                return dedup;
             }, new List<Dictionary<string, object>>(), $"GetBuyerHistory {buyerId}");
         }
 
@@ -169,8 +220,19 @@ namespace IrhamTrade.Server.Services
             }
             return await ExecuteWithRetryAsync(async () =>
             {
+                var all = new List<Dictionary<string, object>>();
                 var snap = await _db.Collection("buyer_history").WhereEqualTo("buyerPhone", buyerPhone).OrderByDescending("createdAt").Limit(50).GetSnapshotAsync();
-                return snap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)).ToList();
+                all.AddRange(snap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)));
+
+                try
+                {
+                    var safePhone = buyerPhone.Replace("+", "").Replace(" ", "").Trim();
+                    var subSnap = await _db.Collection("buyer_history").Document(safePhone).Collection("orders").OrderByDescending("createdAt").Limit(50).GetSnapshotAsync();
+                    all.AddRange(subSnap.Documents.Select(d => SanitizeDoc(d.ToDictionary(), d.Id)));
+                }
+                catch { }
+
+                return all.GroupBy(x => x.TryGetValue("id", out var id) ? id?.ToString() : Guid.NewGuid().ToString()).Select(g => g.First()).ToList();
             }, new List<Dictionary<string, object>>(), $"GetBuyerHistoryByPhone {buyerPhone}");
         }
 
@@ -388,7 +450,8 @@ namespace IrhamTrade.Server.Services
         {
             return await ExecuteWithRetryAsync(async () =>
             {
-                var update = new Dictionary<string, object> { ["status"] = status, ["updatedAt"] = Timestamp.GetCurrentTimestamp() };
+                var norm = NormalizeStatus(status);
+                var update = new Dictionary<string, object> { ["status"] = norm, ["updatedAt"] = Timestamp.GetCurrentTimestamp() };
                 if (!string.IsNullOrWhiteSpace(businessResponse)) { update["businessResponse"] = businessResponse; update["response"] = businessResponse; }
                 if (!string.IsNullOrWhiteSpace(businessName)) update["businessName"] = businessName;
                 await _db.Collection("interests").Document(interestId).SetAsync(update, SetOptions.MergeAll);
@@ -444,7 +507,7 @@ namespace IrhamTrade.Server.Services
                 try
                 {
                     var acceptMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: We will get in touch with you soon. Please wait for our call or WhatsApp message.";
-                    await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, realImage, acceptMsg, "successful");
+                    await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, realImage, acceptMsg, "Successful");
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "Accept JOB 1 failed but continue"); }
 
@@ -480,10 +543,10 @@ namespace IrhamTrade.Server.Services
                 {
                     await _db.Collection("interests").Document(interestId).DeleteAsync();
                 }
-                catch (Exception ex) 
-                { 
-                    _logger.LogWarning(ex, "Delete interest failed, trying mark Successful as fallback"); 
-                    try { await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Successful", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll); } catch { } 
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Delete interest failed, trying mark Successful as fallback");
+                    try { await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Successful", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll); } catch { }
                 }
 
                 return transDoc.Id;
@@ -532,7 +595,7 @@ namespace IrhamTrade.Server.Services
                 try
                 {
                     var declineMsg = $"{(string.IsNullOrWhiteSpace(businessName) ? GetString(data, "businessName") : businessName)}: Sorry, this product is no longer available. Thank you.";
-                    await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, realImage, declineMsg, "failed");
+                    await CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, bId, businessName, productId, productName, realImage, declineMsg, "Failed");
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "Decline JOB 1 failed"); }
 

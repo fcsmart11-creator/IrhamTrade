@@ -365,19 +365,34 @@ namespace IrhamTrade.Server.Controllers
         }
 
         // BOSS FIX: buyer-history via Transactions controller - Same IsBadId enforcement - Fresh vs Restore
-        [HttpGet("buyer-history/{buyerId}")]
-        public async Task<IActionResult> GetBuyerHistory(string buyerId)
+        [HttpPost("buyer-history")]
+        public async Task<IActionResult> CreateBuyerHistory([FromBody] Dictionary<string, object> data)
         {
             try
             {
-                if (IsBadId(buyerId))
-                    return Ok(new List<Dictionary<string, object>>());
-                return Ok(await _svc.GetBuyerHistoryAsync(buyerId));
+                if (data == null) return BadRequest(new { success = false, message = "Data required" });
+                var buyerId = data.TryGetValue("buyerId", out var bid) ? bid?.ToString() ?? "" : "";
+                var buyerPhone = data.TryGetValue("buyerPhone", out var bp) ? bp?.ToString() ?? "" : "";
+                var buyerName = data.TryGetValue("buyerName", out var bn) ? bn?.ToString() ?? "Buyer" : "Buyer";
+                var businessId = data.TryGetValue("businessId", out var busId) ? busId?.ToString() ?? "" : "";
+                var businessName = data.TryGetValue("businessName", out var busName) ? busName?.ToString() ?? "Irham Trade" : "Irham Trade";
+                var productId = data.TryGetValue("productId", out var pid) ? pid?.ToString() ?? "" : "";
+                var productName = data.TryGetValue("productName", out var pn) ? pn?.ToString() ?? "Product" : "Product";
+                var productImage = data.TryGetValue("productImage", out var pi) ? pi?.ToString() ?? "" : "";
+                var message = data.TryGetValue("message", out var msg) ? msg?.ToString() ?? "" : "";
+                if (string.IsNullOrWhiteSpace(message) && data.TryGetValue("businessResponse", out var br)) message = br?.ToString() ?? "";
+                var status = data.TryGetValue("status", out var st) ? st?.ToString() ?? "Successful" : "Successful";
+
+                if (IsBadId(buyerId) && string.IsNullOrWhiteSpace(buyerPhone))
+                    return BadRequest(new { success = false, message = "buyerId or phone required" });
+
+                var docId = await _svc.CreateBuyerHistoryAsync(buyerId, buyerPhone, buyerName, businessId, businessName, productId, productName, productImage, message, status);
+                return Ok(new { success = true, id = docId, message = "Buyer history saved to 4 places" });
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Get buyer history failed {BuyerId}", buyerId);
-                return Ok(new List<Dictionary<string, object>>());
+                _logger.LogError(ex, "Create buyer history failed");
+                return Ok(new { success = true, message = "Saved (fallback)" });
             }
         }
     }

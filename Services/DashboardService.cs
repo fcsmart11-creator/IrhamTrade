@@ -480,10 +480,10 @@ namespace IrhamTrade.Server.Services
                 {
                     await _db.Collection("interests").Document(interestId).DeleteAsync();
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Delete interest failed, trying mark Successful as fallback");
-                    try { await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Successful", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll); } catch { }
+                catch (Exception ex) 
+                { 
+                    _logger.LogWarning(ex, "Delete interest failed, trying mark Successful as fallback"); 
+                    try { await _db.Collection("interests").Document(interestId).SetAsync(new Dictionary<string, object> { ["status"] = "Successful", ["businessName"] = businessName, ["updatedAt"] = Timestamp.GetCurrentTimestamp() }, SetOptions.MergeAll); } catch { } 
                 }
 
                 return transDoc.Id;

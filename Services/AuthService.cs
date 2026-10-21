@@ -126,6 +126,51 @@ namespace IrhamTrade.Server.Services
             try
             {
                 email = email.Trim().ToLowerInvariant();
+
+                // FACEBOOK STANDARD ADDED: Firestore FIRST - If Firestore profile exists, use it - Source of truth for profile
+                try
+                {
+                    if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
+                    {
+                        var snap = await _firebaseService.FirestoreDb.Collection("users").WhereEqualTo("email", email).Limit(1).GetSnapshotAsync();
+                        if (snap.Count > 0)
+                        {
+                            var doc = snap.Documents[0];
+                            var dict = doc.ToDictionary();
+                            string id = doc.Id;
+                            if (dict.TryGetValue("id", out var idObj) && !IsBadId(idObj?.ToString()))
+                                id = idObj.ToString()!;
+
+                            if (!IsBadId(id))
+                            {
+                                string role = dict.TryGetValue("role", out var r) ? r?.ToString() ?? "buyer" : "buyer";
+                                string bName = dict.TryGetValue("businessName", out var bn) ? bn?.ToString() ?? "" : "";
+                                string fName = dict.TryGetValue("fullName", out var fn) ? fn?.ToString() ?? "" : "";
+                                string phone = dict.TryGetValue("phone", out var ph) ? ph?.ToString() ?? "" : "";
+                                string loc = dict.TryGetValue("location", out var l) ? l?.ToString() ?? "Ghana" : "Ghana";
+
+                                if (IsEmailPrefix(bName)) bName = "";
+                                if (IsEmailPrefix(fName)) fName = "";
+
+                                var appUserFs = new AppUser
+                                {
+                                    Id = id,
+                                    Role = role,
+                                    BusinessName = bName,
+                                    FullName = fName,
+                                    Phone = phone,
+                                    Location = loc,
+                                    Email = email,
+                                    Token = GenerateJwtFromUid(id, email, role, bName, fName, phone, loc)
+                                };
+                                _logger.LogInformation("GetUserByEmail SUCCESS Firestore {Email} RealId {Id}", email, id);
+                                return new AuthResult { Success = true, Message = "User found in Firestore", User = appUserFs };
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex) { _logger.LogWarning(ex, "GetUserByEmail Firestore fallback failed"); }
+
                 var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
 
                 if (user != null)
@@ -136,10 +181,10 @@ namespace IrhamTrade.Server.Services
                         {
                             if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
                             {
-                                var snap = await _firebaseService.FirestoreDb.Collection("users").WhereEqualTo("email", email).Limit(1).GetSnapshotAsync();
-                                if (snap.Count > 0)
+                                var snap2 = await _firebaseService.FirestoreDb.Collection("users").WhereEqualTo("email", email).Limit(1).GetSnapshotAsync();
+                                if (snap2.Count > 0)
                                 {
-                                    var dict = snap.Documents[0].ToDictionary();
+                                    var dict = snap2.Documents[0].ToDictionary();
                                     if (dict.TryGetValue("id", out var idObj) && !IsBadId(idObj?.ToString()))
                                     {
                                         user.FirebaseUid = idObj.ToString()!;
@@ -159,48 +204,6 @@ namespace IrhamTrade.Server.Services
                     _logger.LogInformation("GetUserByEmail SUCCESS {Email} RealId {Id} Name {Name}", email, appUser.Id, appUser.BusinessName + appUser.FullName);
                     return new AuthResult { Success = true, Message = "User found", User = appUser };
                 }
-
-                try
-                {
-                    if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
-                    {
-                        var snap = await _firebaseService.FirestoreDb.Collection("users").WhereEqualTo("email", email).Limit(1).GetSnapshotAsync();
-                        if (snap.Count > 0)
-                        {
-                            var doc = snap.Documents[0];
-                            var dict = doc.ToDictionary();
-                            string id = doc.Id;
-                            if (dict.TryGetValue("id", out var idObj) && !IsBadId(idObj?.ToString()))
-                                id = idObj.ToString()!;
-
-                            if (IsBadId(id)) return Fail("Invalid ID stored");
-
-                            string role = dict.TryGetValue("role", out var r) ? r?.ToString() ?? "buyer" : "buyer";
-                            string bName = dict.TryGetValue("businessName", out var bn) ? bn?.ToString() ?? "" : "";
-                            string fName = dict.TryGetValue("fullName", out var fn) ? fn?.ToString() ?? "" : "";
-                            string phone = dict.TryGetValue("phone", out var ph) ? ph?.ToString() ?? "" : "";
-                            string loc = dict.TryGetValue("location", out var l) ? l?.ToString() ?? "Ghana" : "Ghana";
-
-                            if (IsEmailPrefix(bName)) bName = "";
-                            if (IsEmailPrefix(fName)) fName = "";
-
-                            var appUser = new AppUser
-                            {
-                                Id = id,
-                                Role = role,
-                                BusinessName = bName,
-                                FullName = fName,
-                                Phone = phone,
-                                Location = loc,
-                                Email = email,
-                                Token = ""
-                            };
-
-                            return new AuthResult { Success = true, Message = "User found in Firestore", User = appUser };
-                        }
-                    }
-                }
-                catch (Exception ex) { _logger.LogWarning(ex, "GetUserByEmail Firestore fallback failed"); }
 
                 return Fail("User not found");
             }
@@ -223,32 +226,79 @@ namespace IrhamTrade.Server.Services
 
             try
             {
-                if (await _context.Users.AnyAsync(u => u.Email == email))
-                    return Fail("An account with this email already exists. Please log in instead");
-
                 string firebaseUid = "";
+                bool firebaseExists = false;
+
                 try
                 {
                     if (_firebaseService.IsInitialized && _firebaseService.FirebaseAuth != null)
                     {
-                        var fbUser = await ExecuteWithRetryAsync(async () =>
+                        var existing = await _firebaseService.FirebaseAuth.GetUserByEmailAsync(email);
+                        if (existing != null)
                         {
-                            return await _firebaseService.FirebaseAuth!.CreateUserAsync(new UserRecordArgs
-                            {
-                                Email = email,
-                                Password = password,
-                                DisplayName = businessName,
-                                EmailVerified = false
-                            });
-                        }, null!, "Firebase Create Business", 2);
-                        if (fbUser != null) firebaseUid = fbUser.Uid;
+                            firebaseExists = true;
+                            firebaseUid = existing.Uid;
+                            _logger.LogInformation("RegisterBusiness - Firebase already has {Email} UID {Uid} - Will check role", email, firebaseUid);
+                        }
                     }
                 }
-                catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
+                catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
                 {
-                    return Fail("An account with this email already exists. Please log in instead");
+                    var ghosts = await _context.Users.Where(u => u.Email == email).ToListAsync();
+                    if (ghosts.Count > 0)
+                    {
+                        _context.Users.RemoveRange(ghosts);
+                        await _context.SaveChangesAsync();
+                        _logger.LogWarning("Cleaned {Count} ghost SQLite rows for {Email} - Firebase says fresh", ghosts.Count, email);
+                    }
+                    firebaseExists = false;
                 }
-                catch (Exception ex) { _logger.LogWarning(ex, "Firebase Auth create skipped, using DB only"); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Firebase check skipped for {Email}", email); }
+
+                if (firebaseExists)
+                {
+                    var existingBusiness = await _context.Users.FirstOrDefaultAsync(u => u.Email == email && u.Role == "business");
+                    if (existingBusiness != null)
+                    {
+                        return Fail("An account with this email already exists. Please log in instead");
+                    }
+                    var fbLoginCheck = await TryFirebaseLoginAsync(email, password);
+                    if (!fbLoginCheck.Success)
+                    {
+                        _logger.LogWarning("Firebase user exists for {Email} but password mismatch during business register", email);
+                        return Fail("An account with this email already exists. Please log in instead - Use same password as buyer if same email");
+                    }
+                    firebaseUid = fbLoginCheck.User!.Id;
+                }
+
+                if (!firebaseExists)
+                {
+                    try
+                    {
+                        if (_firebaseService.IsInitialized && _firebaseService.FirebaseAuth != null)
+                        {
+                            var fbUser = await ExecuteWithRetryAsync(async () =>
+                            {
+                                return await _firebaseService.FirebaseAuth!.CreateUserAsync(new UserRecordArgs
+                                {
+                                    Email = email,
+                                    Password = password,
+                                    DisplayName = businessName,
+                                    EmailVerified = false
+                                });
+                            }, null!, "Firebase Create Business", 2);
+                            if (fbUser != null) firebaseUid = fbUser.Uid;
+                        }
+                    }
+                    catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
+                    {
+                        return Fail("An account with this email already exists. Please log in instead");
+                    }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Firebase Auth create skipped, using DB only"); }
+                }
+
+                if (await _context.Users.AnyAsync(u => u.Email == email && u.Role == "business"))
+                    return Fail("An account with this email already exists. Please log in instead");
 
                 var user = new User
                 {
@@ -335,31 +385,73 @@ namespace IrhamTrade.Server.Services
 
             try
             {
-                if (await _context.Users.AnyAsync(u => u.Email == email))
-                    return Fail("An account with this email already exists. Please log in instead");
-
                 string firebaseUid = "";
+                bool firebaseExists = false;
+
                 try
                 {
                     if (_firebaseService.IsInitialized && _firebaseService.FirebaseAuth != null)
                     {
-                        var fbUser = await ExecuteWithRetryAsync(async () =>
+                        var existing = await _firebaseService.FirebaseAuth.GetUserByEmailAsync(email);
+                        if (existing != null)
                         {
-                            return await _firebaseService.FirebaseAuth!.CreateUserAsync(new UserRecordArgs
-                            {
-                                Email = email,
-                                Password = password,
-                                DisplayName = fullName
-                            });
-                        }, null!, "Firebase Create Buyer", 2);
-                        if (fbUser != null) firebaseUid = fbUser.Uid;
+                            firebaseExists = true;
+                            firebaseUid = existing.Uid;
+                        }
                     }
                 }
-                catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
+                catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.UserNotFound)
                 {
-                    return Fail("An account with this email already exists. Please log in instead");
+                    var ghosts = await _context.Users.Where(u => u.Email == email).ToListAsync();
+                    if (ghosts.Count > 0)
+                    {
+                        _context.Users.RemoveRange(ghosts);
+                        await _context.SaveChangesAsync();
+                        _logger.LogWarning("Cleaned {Count} ghost SQLite rows for buyer {Email}", ghosts.Count, email);
+                    }
+                    firebaseExists = false;
                 }
-                catch (Exception ex) { _logger.LogWarning(ex, "Firebase create skipped"); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Firebase check skipped"); }
+
+                if (firebaseExists)
+                {
+                    var existingBuyer = await _context.Users.FirstOrDefaultAsync(u => u.Email == email && u.Role == "buyer");
+                    if (existingBuyer != null)
+                        return Fail("An account with this email already exists. Please log in instead");
+
+                    var fbLoginCheck = await TryFirebaseLoginAsync(email, password);
+                    if (!fbLoginCheck.Success)
+                        return Fail("An account with this email already exists. Please log in instead");
+                    firebaseUid = fbLoginCheck.User!.Id;
+                }
+
+                if (!firebaseExists)
+                {
+                    try
+                    {
+                        if (_firebaseService.IsInitialized && _firebaseService.FirebaseAuth != null)
+                        {
+                            var fbUser = await ExecuteWithRetryAsync(async () =>
+                            {
+                                return await _firebaseService.FirebaseAuth!.CreateUserAsync(new UserRecordArgs
+                                {
+                                    Email = email,
+                                    Password = password,
+                                    DisplayName = fullName
+                                });
+                            }, null!, "Firebase Create Buyer", 2);
+                            if (fbUser != null) firebaseUid = fbUser.Uid;
+                        }
+                    }
+                    catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
+                    {
+                        return Fail("An account with this email already exists. Please log in instead");
+                    }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Firebase create skipped"); }
+                }
+
+                if (await _context.Users.AnyAsync(u => u.Email == email && u.Role == "buyer"))
+                    return Fail("An account with this email already exists. Please log in instead");
 
                 var user = new User
                 {
@@ -443,102 +535,11 @@ namespace IrhamTrade.Server.Services
 
             try
             {
-                var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
-                if (user != null)
-                {
-                    if (BCrypt.Net.BCrypt.Verify(password, user.PasswordHash))
-                    {
-                        user.LastLoginAt = DateTime.UtcNow;
-                        try { await _context.SaveChangesAsync(); } catch (Exception ex) { _logger.LogWarning(ex, "LastLogin update failed"); }
-
-                        var appUser = ToAppUser(user);
-                        appUser.Token = GenerateJwt(user);
-
-                        if (!string.IsNullOrWhiteSpace(user.FirebaseUid) && !IsBadId(user.FirebaseUid))
-                        {
-                            appUser.Id = user.FirebaseUid;
-                        }
-                        else
-                        {
-                            try
-                            {
-                                if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
-                                {
-                                    var snap = await _firebaseService.FirestoreDb.Collection("users").WhereEqualTo("email", email).Limit(1).GetSnapshotAsync();
-                                    if (snap.Count > 0)
-                                    {
-                                        var dict = snap.Documents[0].ToDictionary();
-                                        if (dict.TryGetValue("id", out var idObj) && !string.IsNullOrWhiteSpace(idObj?.ToString()) && !IsBadId(idObj.ToString()))
-                                        {
-                                            appUser.Id = idObj.ToString()!;
-                                            user.FirebaseUid = appUser.Id;
-                                            try { await _context.SaveChangesAsync(); } catch { }
-                                        }
-                                        if (dict.TryGetValue("businessName", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString()) && !IsEmailPrefix(bn?.ToString()))
-                                            appUser.BusinessName = bn.ToString()!;
-                                        if (dict.TryGetValue("fullName", out var fn) && !string.IsNullOrWhiteSpace(fn?.ToString()) && !IsEmailPrefix(fn?.ToString()))
-                                            appUser.FullName = fn.ToString()!;
-                                        if (dict.TryGetValue("phone", out var ph) && !string.IsNullOrWhiteSpace(ph?.ToString()))
-                                            appUser.Phone = ph.ToString()!;
-                                        if (dict.TryGetValue("location", out var loc) && !string.IsNullOrWhiteSpace(loc?.ToString()))
-                                            appUser.Location = loc.ToString()!;
-                                        if (dict.TryGetValue("role", out var r) && !string.IsNullOrWhiteSpace(r?.ToString()))
-                                            appUser.Role = r.ToString()!;
-                                    }
-                                }
-                            }
-                            catch (Exception ex) { _logger.LogWarning(ex, "Failed to restore real ID from Firestore for {Email}", email); }
-                        }
-
-                        if (!IsBadId(appUser.Id))
-                        {
-                            _logger.LogInformation("Login SUCCESS via SQLite {Email} Role {Role} RealId {RealId} Name {Name} - SAME AS REGISTER", email, user.Role, appUser.Id, appUser.BusinessName + appUser.FullName);
-                            return new AuthResult { Success = true, Message = "Login successful", User = appUser };
-                        }
-                        else
-                        {
-                            _logger.LogWarning("Login SQLite returned bad Id {Id} for {Email}, trying Firebase fallback", appUser.Id, email);
-                        }
-                    }
-                    _logger.LogInformation("SQLite password mismatch for {Email}, trying Firebase fallback", email);
-                }
-
                 var fbResult = await TryFirebaseLoginAsync(email, password);
                 if (fbResult.Success && fbResult.User != null && !IsBadId(fbResult.User.Id))
                 {
-                    if (user != null)
-                    {
-                        try
-                        {
-                            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(password);
-                            user.LastLoginAt = DateTime.UtcNow;
-                            if (string.IsNullOrWhiteSpace(user.FirebaseUid) && !IsBadId(fbResult.User.Id))
-                                user.FirebaseUid = fbResult.User.Id;
-                            if (string.IsNullOrWhiteSpace(user.Phone) && !string.IsNullOrWhiteSpace(fbResult.User.Phone))
-                                user.Phone = fbResult.User.Phone;
-                            if (string.IsNullOrWhiteSpace(user.Location) && !string.IsNullOrWhiteSpace(fbResult.User.Location))
-                                user.Location = fbResult.User.Location;
-                            if (string.IsNullOrWhiteSpace(user.BusinessName) && !string.IsNullOrWhiteSpace(fbResult.User.BusinessName) && !IsEmailPrefix(fbResult.User.BusinessName))
-                                user.BusinessName = fbResult.User.BusinessName;
-                            if (string.IsNullOrWhiteSpace(user.FullName) && !string.IsNullOrWhiteSpace(fbResult.User.FullName) && !IsEmailPrefix(fbResult.User.FullName))
-                                user.FullName = fbResult.User.FullName;
-
-                            await _context.SaveChangesAsync();
-                            _logger.LogInformation("Updated SQLite from Firebase for {Email} RealId {Id} RealName {Name}", email, fbResult.User.Id, fbResult.User.FullName + fbResult.User.BusinessName);
-
-                            var appUserUpdated = ToAppUser(user);
-                            appUserUpdated.Id = fbResult.User.Id;
-                            appUserUpdated.BusinessName = !string.IsNullOrWhiteSpace(fbResult.User.BusinessName) ? fbResult.User.BusinessName : appUserUpdated.BusinessName;
-                            appUserUpdated.FullName = !string.IsNullOrWhiteSpace(fbResult.User.FullName) ? fbResult.User.FullName : appUserUpdated.FullName;
-                            appUserUpdated.Phone = !string.IsNullOrWhiteSpace(fbResult.User.Phone) ? fbResult.User.Phone : appUserUpdated.Phone;
-                            appUserUpdated.Location = !string.IsNullOrWhiteSpace(fbResult.User.Location) ? fbResult.User.Location : appUserUpdated.Location;
-                            appUserUpdated.Role = fbResult.User.Role;
-                            appUserUpdated.Token = GenerateJwt(user);
-                            return new AuthResult { Success = true, Message = "Login successful", User = appUserUpdated };
-                        }
-                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to update SQLite for {Email}", email); }
-                    }
-                    else
+                    var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+                    if (user == null)
                     {
                         try
                         {
@@ -550,7 +551,6 @@ namespace IrhamTrade.Server.Services
                                 safeFullName = safeBusinessName;
                             if (string.IsNullOrWhiteSpace(safeBusinessName) && role == "business" && !string.IsNullOrWhiteSpace(safeFullName))
                                 safeBusinessName = safeFullName;
-
                             if (string.IsNullOrWhiteSpace(safeFullName))
                                 safeFullName = "User";
 
@@ -577,14 +577,60 @@ namespace IrhamTrade.Server.Services
                         }
                         catch (Exception ex) { _logger.LogWarning(ex, "Auto-create SQLite failed for {Email}", email); }
                     }
+                    else
+                    {
+                        try
+                        {
+                            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(password);
+                            user.LastLoginAt = DateTime.UtcNow;
+                            if (string.IsNullOrWhiteSpace(user.FirebaseUid) || IsBadId(user.FirebaseUid))
+                                user.FirebaseUid = fbResult.User.Id;
+                            if (string.IsNullOrWhiteSpace(user.Phone) && !string.IsNullOrWhiteSpace(fbResult.User.Phone))
+                                user.Phone = fbResult.User.Phone;
+                            if (string.IsNullOrWhiteSpace(user.Location) && !string.IsNullOrWhiteSpace(fbResult.User.Location))
+                                user.Location = fbResult.User.Location;
+                            if (string.IsNullOrWhiteSpace(user.BusinessName) && !string.IsNullOrWhiteSpace(fbResult.User.BusinessName) && !IsEmailPrefix(fbResult.User.BusinessName))
+                                user.BusinessName = fbResult.User.BusinessName;
+                            if (string.IsNullOrWhiteSpace(user.FullName) && !string.IsNullOrWhiteSpace(fbResult.User.FullName) && !IsEmailPrefix(fbResult.User.FullName))
+                                user.FullName = fbResult.User.FullName;
+                            await _context.SaveChangesAsync();
+                            _logger.LogInformation("Updated SQLite from Firebase for {Email} RealId {Id}", email, fbResult.User.Id);
+                        }
+                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to update SQLite for {Email}", email); }
+                    }
 
+                    var dbUserForJwt = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+                    if (dbUserForJwt != null)
+                        fbResult.User.Token = GenerateJwt(dbUserForJwt);
+                    else
+                        fbResult.User.Token = GenerateJwtFromUid(fbResult.User.Id, email, fbResult.User.Role, fbResult.User.BusinessName, fbResult.User.FullName, fbResult.User.Phone, fbResult.User.Location);
+
+                    _logger.LogInformation("Login SUCCESS via Firebase FIRST {Email} Role {Role} RealId {RealId} Name {Name} - SAME AS REGISTER", email, fbResult.User.Role, fbResult.User.Id, fbResult.User.FullName + fbResult.User.BusinessName);
                     return fbResult;
                 }
 
-                if (user == null)
-                    return Fail("No account found with this email. Please create an account first");
-                else
-                    return Fail("Incorrect email or password. Please try again");
+                var localUser = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+                if (localUser != null)
+                {
+                    if (BCrypt.Net.BCrypt.Verify(password, localUser.PasswordHash))
+                    {
+                        localUser.LastLoginAt = DateTime.UtcNow;
+                        try { await _context.SaveChangesAsync(); } catch { }
+                        var appUser = ToAppUser(localUser);
+                        appUser.Token = GenerateJwt(localUser);
+                        if (!string.IsNullOrWhiteSpace(localUser.FirebaseUid) && !IsBadId(localUser.FirebaseUid))
+                            appUser.Id = localUser.FirebaseUid;
+                        _logger.LogInformation("Login SUCCESS via SQLite fallback {Email} Role {Role} RealId {RealId}", email, localUser.Role, appUser.Id);
+                        return new AuthResult { Success = true, Message = "Login successful", User = appUser };
+                    }
+                    else
+                    {
+                        _logger.LogInformation("SQLite password mismatch for {Email}, Firebase already tried and failed", email);
+                        return Fail("Incorrect email or password. Please try again");
+                    }
+                }
+
+                return Fail("No account found with this email. Please create an account first");
             }
             catch (Exception ex)
             {
@@ -625,6 +671,7 @@ namespace IrhamTrade.Server.Services
                 string businessName = "";
                 string phone = "";
                 string location = "Ghana";
+                bool firestoreFound = false;
 
                 try
                 {
@@ -639,6 +686,7 @@ namespace IrhamTrade.Server.Services
 
                         if (snap.Exists)
                         {
+                            firestoreFound = true;
                             var dict = snap.ToDictionary();
                             if (dict.TryGetValue("role", out var r) && !string.IsNullOrWhiteSpace(r?.ToString())) role = r?.ToString() ?? role;
                             if (dict.TryGetValue("fullName", out var fn) && !string.IsNullOrWhiteSpace(fn?.ToString()) && !IsEmailPrefix(fn?.ToString())) fullName = fn!.ToString()!.Trim();
@@ -653,10 +701,43 @@ namespace IrhamTrade.Server.Services
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "Firestore profile fetch failed for {Email}", email); }
 
-                if (string.IsNullOrWhiteSpace(fullName) && string.IsNullOrWhiteSpace(businessName))
+                // FACEBOOK STANDARD ADDED: Auto-recreate Firestore if missing - Profile intact always
+                if (!firestoreFound)
                 {
-                    if (!string.IsNullOrWhiteSpace(displayName) && !IsEmailPrefix(displayName))
-                        fullName = displayName.Trim();
+                    try
+                    {
+                        var sqliteUser = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+                        if (sqliteUser != null)
+                        {
+                            role = sqliteUser.Role ?? role;
+                            if (!string.IsNullOrWhiteSpace(sqliteUser.FullName) && !IsEmailPrefix(sqliteUser.FullName)) fullName = sqliteUser.FullName;
+                            if (!string.IsNullOrWhiteSpace(sqliteUser.BusinessName) && !IsEmailPrefix(sqliteUser.BusinessName)) businessName = sqliteUser.BusinessName;
+                            if (!string.IsNullOrWhiteSpace(sqliteUser.Phone)) phone = sqliteUser.Phone;
+                            if (!string.IsNullOrWhiteSpace(sqliteUser.Location)) location = sqliteUser.Location;
+                        }
+                        if (string.IsNullOrWhiteSpace(fullName) && !string.IsNullOrWhiteSpace(displayName) && !IsEmailPrefix(displayName))
+                            fullName = displayName.Trim();
+
+                        if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null && (!string.IsNullOrWhiteSpace(fullName) || !string.IsNullOrWhiteSpace(businessName)))
+                        {
+                            var data = new Dictionary<string, object>
+                            {
+                                { "id", uid },
+                                { "firebaseUid", uid },
+                                { "email", email },
+                                { "role", role },
+                                { "businessName", businessName },
+                                { "fullName", fullName },
+                                { "phone", phone },
+                                { "location", location },
+                                { "createdAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() },
+                                { "updatedAt", Google.Cloud.Firestore.Timestamp.GetCurrentTimestamp() }
+                            };
+                            await _firebaseService.FirestoreDb.Collection("users").Document(uid).SetAsync(data, Google.Cloud.Firestore.SetOptions.MergeAll);
+                            _logger.LogWarning("AUTO-RECREATED Firestore users/{Uid} for {Email} - Facebook standard - Profile intact", uid, email);
+                        }
+                    }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Auto-recreate Firestore failed"); }
                 }
 
                 var appUser = new AppUser
@@ -763,7 +844,6 @@ namespace IrhamTrade.Server.Services
             catch { return false; }
         }
 
-        // BOSS FIX: Added for dev-clear-all endpoint - Clears all blacklisted tokens
         public async Task ClearAllTokensAsync()
         {
             try
@@ -802,6 +882,32 @@ namespace IrhamTrade.Server.Services
                 new Claim("phone", user.Phone?? ""),
                 new Claim("location", user.Location?? ""),
                 new Claim("role", user.Role),
+                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            };
+
+            var token = new JwtSecurityToken(issuer, audience, claims, expires: DateTime.UtcNow.AddMinutes(expireMinutes), signingCredentials: credentials);
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+
+        private string GenerateJwtFromUid(string uid, string email, string role, string businessName, string fullName, string phone, string location)
+        {
+            var key = GetJwtKey();
+            var issuer = _config["Jwt:Issuer"] ?? "IrhamTrade.Server";
+            var audience = _config["Jwt:Audience"] ?? "IrhamTrade.App";
+            var expireMinutes = int.TryParse(_config["Jwt:ExpireMinutes"], out var m) ? m : 1440;
+            var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
+            var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
+
+            var claims = new[]
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, uid),
+                new Claim(JwtRegisteredClaimNames.Email, email),
+                new Claim(ClaimTypes.Role, role),
+                new Claim("businessName", businessName ?? ""),
+                new Claim("fullName", fullName ?? ""),
+                new Claim("phone", phone ?? ""),
+                new Claim("location", location ?? ""),
+                new Claim("role", role),
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
             };
 

@@ -81,63 +81,63 @@ namespace IrhamTrade.Server.Controllers
 
         // Purpose: DEV ONLY - Clear all data for fresh testing - Clears SQLite + Firestore users + blacklisted tokens, use when you clear Firebase console
         [HttpDelete("dev-clear-all")]
-        public async Task<IActionResult> DevClearAll([FromQuery] string confirm)
+        public async Task<IActionResult> DevClearAll([FromQuery] string confirm, [FromQuery] string email = "")
         {
             if (confirm != "IRHAM_CLEAR_2026")
-                return BadRequest(new { success = false, message = "Add ?confirm=IRHAM_CLEAR_2026 to clear. Example: DELETE /api/Auth/dev-clear-all?confirm=IRHAM_CLEAR_2026" });
+                return BadRequest(new { success = false, message = "Add ?confirm=IRHAM_CLEAR_2026&email=ftsmart442@gmail.com" });
 
             try
             {
-                // Clear SQLite Users
-                var users = await _context.Users.ToListAsync();
-                _context.Users.RemoveRange(users);
+                var query = _context.Users.AsQueryable();
+                if (!string.IsNullOrWhiteSpace(email))
+                    query = query.Where(u => u.Email == email.Trim().ToLowerInvariant());
 
-                // Clear Orders if you have - Uncomment if you have these tables
+                var users = await query.ToListAsync();
+                _context.Users.RemoveRange(users);
+                await _context.SaveChangesAsync();
+
+                // Auto-clear Firebase Auth too - Professional
+                int deletedFb = 0;
                 try
                 {
-                    if (_context.GetType().GetProperty("Orders") != null)
+                    if (!string.IsNullOrWhiteSpace(email) && _firebaseService.IsInitialized && _firebaseService.FirebaseAuth != null)
                     {
-                        var orders = await _context.Set<dynamic>().ToListAsync();
-                        // If Orders table exists, clear it - Safe to ignore if not
+                        var fb = await _firebaseService.FirebaseAuth.GetUserByEmailAsync(email.Trim().ToLowerInvariant());
+                        await _firebaseService.FirebaseAuth.DeleteUserAsync(fb.Uid);
+                        deletedFb = 1;
                     }
                 }
                 catch { }
 
-                await _context.SaveChangesAsync();
-
-                // Clear Firestore users collection in background
                 _ = Task.Run(async () =>
                 {
                     try
                     {
                         if (_firebaseService.IsInitialized && _firebaseService.FirestoreDb != null)
                         {
-                            var snapshot = await _firebaseService.FirestoreDb.Collection("users").GetSnapshotAsync();
-                            foreach (var doc in snapshot.Documents)
+                            if (!string.IsNullOrWhiteSpace(email))
                             {
-                                await doc.Reference.DeleteAsync();
+                                var q = await _firebaseService.FirestoreDb.Collection("users").WhereEqualTo("email", email.Trim().ToLowerInvariant()).GetSnapshotAsync();
+                                foreach (var doc in q.Documents) await doc.Reference.DeleteAsync();
                             }
-                            _logger.LogWarning("DEV CLEAR - All Firestore users deleted - Count {Count}", snapshot.Count);
+                            else
+                            {
+                                var snapshot = await _firebaseService.FirestoreDb.Collection("users").GetSnapshotAsync();
+                                foreach (var doc in snapshot.Documents) await doc.Reference.DeleteAsync();
+                            }
                         }
                     }
-                    catch (Exception ex) { _logger.LogError(ex, "Dev clear Firestore failed"); }
+                    catch { }
                 });
 
-                // Clear blacklisted tokens via AuthService
                 await _authService.ClearAllTokensAsync();
-
-                _logger.LogWarning("DEV CLEAR ALL executed - Cleared {Count} users from SQLite", users.Count);
 
                 return Ok(new
                 {
                     success = true,
-                    message = $"Cleared {users.Count} users from SQLite. Firestore users deleting in background. Now manually clear Firebase Auth users in Firebase Console > Authentication.",
+                    message = $"WIPED - SQLite {users.Count}, FirebaseAuth {deletedFb}, Firestore background - Ghost {email} gone - Register fresh now",
                     clearedCount = users.Count,
-                    nextSteps = new[] {
-                        "1. Firebase Console > Authentication > Delete all users",
-                        "2. Firebase Console > Firestore > Delete users collection if still there",
-                        "3. Uninstall app from phone > Reinstall > Register fresh - No old data!"
-                    }
+                    clearedFirebaseAuth = deletedFb
                 });
             }
             catch (Exception ex)

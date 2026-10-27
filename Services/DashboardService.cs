@@ -186,10 +186,13 @@ namespace IrhamTrade.Server.Services
             return data;
         }
 
-        private async Task WriteHistoryMirrorsAsync(string stableId, Dictionary<string, object> data, bool deleteInterest)
+        // FIX 1 of 3: includeTransactions defaults to true so Accept behaves exactly as before.
+        // Decline passes false so a declined order never lands in the business "transactions" (sold) collection.
+        private async Task WriteHistoryMirrorsAsync(string stableId, Dictionary<string, object> data, bool deleteInterest, bool includeTransactions = true)
         {
             var batch = _db.StartBatch();
-            batch.Set(_db.Collection("transactions").Document(stableId), data, SetOptions.MergeAll);
+            if (includeTransactions)
+                batch.Set(_db.Collection("transactions").Document(stableId), data, SetOptions.MergeAll);
             batch.Set(_db.Collection("buyer_history").Document(stableId), data, SetOptions.MergeAll);
             batch.Set(_db.Collection("buyer_transactions").Document(stableId), data, SetOptions.MergeAll);
             if (deleteInterest)
@@ -686,8 +689,9 @@ namespace IrhamTrade.Server.Services
                 var historyData = BuildHistoryData(source, interestId, "Failed", response, displayBusinessName, now);
                 historyData["declinedAt"] = now;
 
-                // Save the final buyer history before removing the pending interest.
-                await WriteHistoryMirrorsAsync(interestId, historyData, true);
+                // FIX 2 of 3: save the final buyer history ONLY (buyer_history + buyer_transactions) and remove the pending interest.
+                // A declined order must NOT be written to "transactions", or it shows as a sold order on the business Transactions screen.
+                await WriteHistoryMirrorsAsync(interestId, historyData, true, false);
 
                 if (!string.IsNullOrWhiteSpace(productId))
                 {
@@ -714,11 +718,18 @@ namespace IrhamTrade.Server.Services
             }, false, $"Decline {interestId}");
         }
 
+        // FIX 3 of 3: skip Failed records so old declined orders already saved in "transactions" no longer appear as sold orders.
         public async Task<List<Dictionary<string, object>>> GetTransactionsByBusinessAsync(string businessId) =>
             await ExecuteWithRetryAsync(async () =>
             {
                 var snap = await _db.Collection("transactions").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
-                return snap.Documents.Select(d => SanitizeTransaction(d.ToDictionary(), d.Id)).ToList();
+                return snap.Documents
+                    .Where(d =>
+                    {
+                        try { return NormalizeStatus(GetString(d.ToDictionary(), "status")) != "Failed"; }
+                        catch { return true; }
+                    })
+                    .Select(d => SanitizeTransaction(d.ToDictionary(), d.Id)).ToList();
             }, new List<Dictionary<string, object>>(), $"GetTrans {businessId}");
 
         public async Task<bool> CompleteTransactionAsync(string transactionId) =>

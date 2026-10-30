@@ -396,4 +396,82 @@ namespace IrhamTrade.Server.Controllers
             }
         }
     }
+    // Purpose: Push notifications - register/unregister phone tokens, serve the product picture for the alert, status check
+    [ApiController]
+    [Route("api/[controller]")]
+    public class PushController : ControllerBase
+    {
+        private readonly DashboardService _svc;
+        private readonly ILogger<PushController> _logger;
+        public PushController(DashboardService svc, ILogger<PushController> logger) { _svc = svc; _logger = logger; }
+
+        public class RegisterPushRequest
+        {
+            public string UserId { get; set; } = "";
+            public string Role { get; set; } = "";
+            public string Token { get; set; } = "";
+        }
+
+        public class UnregisterPushRequest
+        {
+            public string Token { get; set; } = "";
+        }
+
+        [HttpPost("register")]
+        public async Task<IActionResult> Register([FromBody] RegisterPushRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.UserId) || string.IsNullOrWhiteSpace(req.Token))
+                    return BadRequest(new { success = false, message = "userId and token are required" });
+                var ok = await _svc.RegisterDeviceTokenAsync(req.UserId.Trim(), (req.Role ?? "").Trim().ToLowerInvariant(), req.Token.Trim());
+                return ok ? Ok(new { success = true }) : StatusCode(500, new { success = false, message = "Could not save device token" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Push register failed");
+                return StatusCode(500, new { success = false, message = "Push register failed" });
+            }
+        }
+
+        [HttpPost("unregister")]
+        public async Task<IActionResult> Unregister([FromBody] UnregisterPushRequest req)
+        {
+            try
+            {
+                if (req != null && !string.IsNullOrWhiteSpace(req.Token))
+                    await _svc.UnregisterDeviceTokenAsync(req.Token.Trim());
+                return Ok(new { success = true });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Push unregister failed");
+                return Ok(new { success = true });
+            }
+        }
+
+        [HttpGet("image/{id}")]
+        public async Task<IActionResult> Image(string id)
+        {
+            try
+            {
+                var bytes = await _svc.GetPushImageBytesAsync(id);
+                if (bytes == null || bytes.Length == 0) return NotFound();
+                Response.Headers["Cache-Control"] = "public,max-age=3600";
+                return File(bytes, "image/jpeg");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Push image failed {Id}", id);
+                return NotFound();
+            }
+        }
+
+        [HttpGet("status")]
+        public async Task<IActionResult> Status()
+        {
+            var s = await _svc.GetPushStatusAsync();
+            return Ok(new { firebaseReady = s.FirebaseReady, registeredDevices = s.Tokens });
+        }
+    }
 }

@@ -474,6 +474,13 @@ namespace IrhamTrade.Server.Services
                 var doc = await _db.Collection("interests").AddAsync(cleanData);
                 await _db.Collection("interests").Document(doc.Id)
                     .SetAsync(new Dictionary<string, object> { ["id"] = doc.Id, ["interestId"] = doc.Id }, SetOptions.MergeAll);
+
+                // PUSH: alert the seller's phone (never blocks or fails the interest)
+                _ = SendPushToUserAsync(businessId, "new_order",
+                    $"New order from {(string.IsNullOrWhiteSpace(buyerName) ? "a buyer" : buyerName)}",
+                    $"{(string.IsNullOrWhiteSpace(productName) ? "A product" : productName)} - GHS {price}\n{buyerPhone} - {buyerLocation}",
+                    doc.Id, "orders");
+
                 return doc.Id;
             }
             catch (Exception ex)
@@ -651,6 +658,9 @@ namespace IrhamTrade.Server.Services
                     }
                 }
 
+                // PUSH: alert the buyer's phone with the seller's response (never blocks or fails the accept)
+                _ = SendPushToUserAsync(buyerId, "order_accepted", $"Order accepted: {ProductLabel(source)}", response, interestId, "history");
+
                 _logger.LogInformation("Accepted order {InterestId}; history mirrors use the same document ID", interestId);
                 return interestId;
             }, "", $"Accept {interestId}");
@@ -712,6 +722,9 @@ namespace IrhamTrade.Server.Services
                         _logger.LogError(ex, "Decline history saved but product {ProductId} could not be released", productId);
                     }
                 }
+
+                // PUSH: alert the buyer's phone with the seller's response (never blocks or fails the decline)
+                _ = SendPushToUserAsync(GetBuyerId(source), "order_declined", $"Order declined: {ProductLabel(source)}", response, interestId, "history");
 
                 _logger.LogInformation("Declined order {InterestId}; history mirrors use the same document ID", interestId);
                 return true;
@@ -786,6 +799,383 @@ namespace IrhamTrade.Server.Services
                 await _db.Collection("transactions").Document(transactionId).DeleteAsync();
                 return true;
             }, false, $"Incomplete {transactionId}");
+
+        // ===================== PUSH NOTIFICATIONS (FCM) =====================
+        private const string PUSH_PUBLIC_URL = "https://irhamtrade.onrender.com";
+
+        private static FirebaseAdmin.Messaging.FirebaseMessaging? GetMessagingSafe()
+        {
+            try
+            {
+                var app = FirebaseAdmin.FirebaseApp.DefaultInstance;
+                if (app == null) return null;
+                return FirebaseAdmin.Messaging.FirebaseMessaging.GetMessaging(app);
+            }
+            catch { return null; }
+        }
+
+        private static string TokenDocId(string token)
+        {
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            return Convert.ToHexString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(token)));
+        }
+
+        private static string ProductLabel(Dictionary<string, object> d)
+        {
+            var n = GetString(d, "productName");
+            if (string.IsNullOrWhiteSpace(n)) n = GetString(d, "name");
+            return string.IsNullOrWhiteSpace(n) ? "your product" : n;
+        }
+
+        public async Task<bool> RegisterDeviceTokenAsync(string userId, string role, string token)
+        {
+            if (IsBadId(userId) || string.IsNullOrWhiteSpace(token) || token.Length < 20) return false;
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                await _db.Collection("device_tokens").Document(TokenDocId(token)).SetAsync(new Dictionary<string, object>
+                {
+                    ["token"] = token,
+                    ["userId"] = userId,
+                    ["role"] = role ?? "",
+                    ["platform"] = "android",
+                    ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                });
+                return true;
+            }, false, $"RegisterToken {userId}");
+        }
+
+        public async Task<bool> UnregisterDeviceTokenAsync(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token)) return false;
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                await _db.Collection("device_tokens").Document(TokenDocId(token)).DeleteAsync();
+                return true;
+            }, false, "UnregisterToken");
+        }
+
+        public async Task<(bool FirebaseReady, int Tokens)> GetPushStatusAsync()
+        {
+            var ready = GetMessagingSafe() != null;
+            var count = 0;
+            try { var snap = await _db.Collection("device_tokens").Limit(500).GetSnapshotAsync(); count = snap.Count; } catch { }
+            return (ready, count);
+        }
+
+        public async Task<byte[]?> GetPushImageBytesAsync(string id)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(id)) return null;
+                string img = "";
+                foreach (var col in new[] { "interests", "buyer_history" })
+                {
+                    var snap = await _db.Collection(col).Document(id).GetSnapshotAsync();
+                    if (!snap.Exists) continue;
+                    var d = snap.ToDictionary();
+                    img = GetString(d, "productImage");
+                    if (string.IsNullOrWhiteSpace(img)) img = GetString(d, "imageBase64");
+                    if (string.IsNullOrWhiteSpace(img)) img = GetString(d, "imageUrl");
+                    if (!string.IsNullOrWhiteSpace(img)) break;
+                }
+                if (string.IsNullOrWhiteSpace(img)) return null;
+                var comma = img.IndexOf(',');
+                if (img.StartsWith("data:", StringComparison.OrdinalIgnoreCase) && comma > 0) img = img.Substring(comma + 1);
+                return Convert.FromBase64String(img.Trim());
+            }
+            catch { return null; }
+        }
+
+        // Fire-and-forget: never throws, never blocks Accept/Decline/Interest
+        private async Task SendPushToUserAsync(string userId, string type, string title, string body, string interestId, string route)
+        {
+            try
+            {
+                if (IsBadId(userId)) return;
+                var messaging = GetMessagingSafe();
+                if (messaging == null) { _logger.LogWarning("Push skipped: no default FirebaseApp on the server"); return; }
+
+                var snap = await _db.Collection("device_tokens").WhereEqualTo("userId", userId).GetSnapshotAsync();
+                if (snap.Count == 0) { _logger.LogInformation("Push skipped: no registered phone for {UserId}", userId); return; }
+
+                foreach (var doc in snap.Documents)
+                {
+                    var token = doc.ContainsField("token") ? doc.GetValue<string>("token") : "";
+                    if (string.IsNullOrWhiteSpace(token)) continue;
+                    try
+                    {
+                        var message = new FirebaseAdmin.Messaging.Message
+                        {
+                            Token = token,
+                            Data = new Dictionary<string, string>
+                            {
+                                ["type"] = type,
+                                ["title"] = title ?? "",
+                                ["body"] = body ?? "",
+                                ["route"] = route ?? "",
+                                ["interestId"] = interestId ?? "",
+                                ["targetUserId"] = userId,
+                                ["imageUrl"] = string.IsNullOrWhiteSpace(interestId) ? "" : $"{PUSH_PUBLIC_URL}/api/Push/image/{Uri.EscapeDataString(interestId)}"
+                            },
+                            Android = new FirebaseAdmin.Messaging.AndroidConfig
+                            {
+                                Priority = FirebaseAdmin.Messaging.Priority.High,
+                                TimeToLive = TimeSpan.FromHours(24)
+                            }
+                        };
+                        await messaging.SendAsync(message);
+                        _logger.LogInformation("Push {Type} sent to {UserId}", type, userId);
+                    }
+                    catch (FirebaseAdmin.Messaging.FirebaseMessagingException fex)
+                    {
+                        _logger.LogWarning("Push {Type} failed for {UserId}: {Code} {Msg}", type, userId, fex.MessagingErrorCode, fex.Message);
+                        if (fex.MessagingErrorCode == FirebaseAdmin.Messaging.MessagingErrorCode.Unregistered ||
+                            fex.MessagingErrorCode == FirebaseAdmin.Messaging.MessagingErrorCode.InvalidArgument)
+                        {
+                            try { await doc.Reference.DeleteAsync(); } catch { }
+                        }
+                    }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Push send error for {UserId}", userId); }
+                }
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Push failed for {UserId}", userId); }
+        }
+        // ===================== END PUSH =====================
+
+        // ===================== BUSINESS ORDER HISTORY (accepted + declined) =====================
+        // Pending orders are deleted by the server once a decision is made, so the Orders page reads past decisions from here.
+        // The product picture is sent as a link (not the full image) so this list stays small and fast.
+        public async Task<List<Dictionary<string, object>>> GetBusinessOrderHistoryAsync(string businessId)
+        {
+            if (IsBadId(businessId)) return new List<Dictionary<string, object>>();
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var all = new Dictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
+                var snap = await _db.Collection("buyer_history").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                foreach (var doc in snap.Documents) all[doc.Id] = SanitizeInterest(doc.ToDictionary(), doc.Id);
+                var snap2 = await _db.Collection("buyer_history").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
+                foreach (var doc in snap2.Documents) all[doc.Id] = SanitizeInterest(doc.ToDictionary(), doc.Id);
+
+                var list = all.Values
+                    .Where(x => NormalizeStatus(GetString(x, "status")) != "Pending")
+                    .OrderByDescending(x => x.TryGetValue("createdAt", out var c) && c is DateTime dt ? dt : DateTime.MinValue)
+                    .Take(100)
+                    .ToList();
+
+                foreach (var x in list)
+                {
+                    var id = GetString(x, "id");
+                    x.Remove("imageBase64");
+                    x.Remove("imageUrl");
+                    x.Remove("deviceImage");
+                    x.Remove("productImageUrl");
+                    x["productImage"] = $"{PUSH_PUBLIC_URL}/api/Push/image/{Uri.EscapeDataString(id)}";
+                }
+                return list;
+            }, new List<Dictionary<string, object>>(), $"GetBusinessOrderHistory {businessId}");
+        }
+
+        // ===================== BUYER PROFILE UPDATE (name, phone, location only) =====================
+        public async Task<bool> UpdateBuyerBasicProfileAsync(string buyerId, string fullName, string phone, string location)
+        {
+            if (IsBadId(buyerId)) return false;
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                await _db.Collection("users").Document(buyerId).SetAsync(new Dictionary<string, object>
+                {
+                    ["fullName"] = fullName,
+                    ["name"] = fullName,
+                    ["phone"] = phone,
+                    ["location"] = location,
+                    ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                }, SetOptions.MergeAll);
+                return true;
+            }, false, $"UpdateBuyerBasic {buyerId}");
+        }
+
+        // ===================== SELLER REPORTS + SAFETY NOTICES =====================
+        private static readonly HttpClient _mailHttp = new() { Timeout = TimeSpan.FromSeconds(20) };
+
+        // Email goes out over HTTPS through Resend. Key and addresses live in Render environment settings, never in the app.
+        private async Task<bool> SendAdminEmailAsync(string subject, string text)
+        {
+            try
+            {
+                var apiKey = Environment.GetEnvironmentVariable("RESEND_API_KEY");
+                var toAddress = Environment.GetEnvironmentVariable("REPORT_TO_EMAIL");
+                var fromAddress = Environment.GetEnvironmentVariable("REPORT_FROM_EMAIL");
+                if (string.IsNullOrWhiteSpace(fromAddress)) fromAddress = "IrhamTrade Reports <onboarding@resend.dev>";
+                if (string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(toAddress))
+                {
+                    _logger.LogWarning("Report email NOT sent: RESEND_API_KEY or REPORT_TO_EMAIL is not set on the server (the report was saved)");
+                    return false;
+                }
+
+                using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.resend.com/emails");
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey.Trim());
+                req.Content = System.Net.Http.Json.JsonContent.Create(new Dictionary<string, object>
+                {
+                    ["from"] = fromAddress.Trim(),
+                    ["to"] = new[] { toAddress.Trim() },
+                    ["subject"] = subject,
+                    ["text"] = text
+                });
+                using var resp = await _mailHttp.SendAsync(req);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    var body = await resp.Content.ReadAsStringAsync();
+                    _logger.LogWarning("Report email rejected {Status}: {Body}", (int)resp.StatusCode, body.Length > 300 ? body.Substring(0, 300) : body);
+                    return false;
+                }
+                _logger.LogInformation("Report email sent");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Report email failed");
+                return false;
+            }
+        }
+
+        public async Task<(bool Ok, string Message)> SubmitSellerReportAsync(string reporterId, string businessId, string businessName, string reason, string details)
+        {
+            try
+            {
+                reporterId = (reporterId ?? "").Trim();
+                businessId = (businessId ?? "").Trim();
+                businessName = (businessName ?? "").Trim();
+                reason = (reason ?? "").Trim();
+                details = (details ?? "").Trim();
+
+                if (IsBadId(reporterId)) return (false, "Please log in again before sending a report.");
+                if (string.IsNullOrWhiteSpace(businessName) && IsBadId(businessId)) return (false, "Please choose or type the seller you are reporting.");
+                if (reason.Length < 3 || reason.Length > 60) return (false, "Please choose a reason for the report.");
+                if (details.Length < 20) return (false, "Please describe what happened (at least 20 characters).");
+                if (details.Length > 1000) details = details.Substring(0, 1000);
+                if (businessName.Length > 80) businessName = businessName.Substring(0, 80);
+
+                // The reporter must be a real registered account
+                var reporterSnap = await _db.Collection("users").Document(reporterId).GetSnapshotAsync();
+                if (!reporterSnap.Exists) return (false, "Your account could not be verified. Please log in again.");
+                var reporter = reporterSnap.ToDictionary();
+
+                // Daily limit per buyer
+                var since = DateTime.UtcNow.AddHours(-24);
+                var mine = await _db.Collection("reports").WhereEqualTo("reporterId", reporterId).GetSnapshotAsync();
+                var recent = mine.Documents.Count(d =>
+                {
+                    try
+                    {
+                        var created = d.ToDictionary().TryGetValue("createdAt", out var v) && v is Timestamp t ? t.ToDateTime() : DateTime.MinValue;
+                        return created > since;
+                    }
+                    catch { return false; }
+                });
+                if (recent >= 5) return (false, "You have reached the daily report limit. Please try again tomorrow.");
+
+                // Fill in the seller's real business name when only the ID is known
+                if (string.IsNullOrWhiteSpace(businessName) && !IsBadId(businessId))
+                {
+                    try
+                    {
+                        var bs = await _db.Collection("users").Document(businessId).GetSnapshotAsync();
+                        if (bs.Exists)
+                        {
+                            var bd = bs.ToDictionary();
+                            businessName = GetString(bd, "businessName");
+                            if (string.IsNullOrWhiteSpace(businessName)) businessName = GetString(bd, "fullName");
+                        }
+                    }
+                    catch { }
+                }
+                if (string.IsNullOrWhiteSpace(businessName)) businessName = "Unknown seller";
+
+                // How many times has this seller been reported (including this report)
+                var total = 1;
+                try
+                {
+                    if (!IsBadId(businessId))
+                    {
+                        var about = await _db.Collection("reports").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                        total = about.Count + 1;
+                    }
+                }
+                catch { }
+
+                var reporterName = GetString(reporter, "fullName");
+                if (string.IsNullOrWhiteSpace(reporterName)) reporterName = GetString(reporter, "name");
+                var reporterPhone = GetString(reporter, "phone");
+                var reporterEmail = GetString(reporter, "email");
+                var reportId = Guid.NewGuid().ToString("N");
+                var now = Timestamp.GetCurrentTimestamp();
+
+                await _db.Collection("reports").Document(reportId).SetAsync(new Dictionary<string, object>
+                {
+                    ["id"] = reportId,
+                    ["reporterId"] = reporterId,
+                    ["reporterName"] = reporterName,
+                    ["reporterPhone"] = reporterPhone,
+                    ["reporterEmail"] = reporterEmail,
+                    ["businessId"] = IsBadId(businessId) ? "" : businessId,
+                    ["businessName"] = businessName,
+                    ["reason"] = reason,
+                    ["details"] = details,
+                    ["status"] = "new",
+                    ["createdAt"] = now
+                });
+
+                var subject = $"[IrhamTrade] Seller report: {businessName} ({total} report{(total == 1 ? "" : "s")})";
+                var text =
+                    "New seller report - IrhamTrade\n\n" +
+                    $"Seller: {businessName}\n" +
+                    $"Seller ID: {(IsBadId(businessId) ? "(not known - typed by the buyer)" : businessId)}\n" +
+                    $"Reports about this seller (including this one): {total}\n\n" +
+                    $"Reason: {reason}\n\n" +
+                    $"Details:\n{details}\n\n" +
+                    $"Reported by: {reporterName}\nPhone: {reporterPhone}\nEmail: {reporterEmail}\n" +
+                    $"Reporter ID: {reporterId}\n" +
+                    $"Report ID: {reportId}\n" +
+                    $"Time (UTC): {DateTime.UtcNow:yyyy-MM-dd HH:mm}\n";
+                _ = SendAdminEmailAsync(subject, text);
+
+                _logger.LogInformation("Seller report {ReportId} saved for {Business} ({Total} total)", reportId, businessName, total);
+                return (true, "Report received. Our team will review it. Thank you for helping keep IrhamTrade safe.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "SubmitSellerReport failed");
+                return (false, "Could not send the report right now. Please try again in a moment.");
+            }
+        }
+
+        // Notices you post in the Firebase console (collection: safety_notices). Hide one by setting active = false.
+        public async Task<List<Dictionary<string, object>>> GetSafetyNoticesAsync()
+        {
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var snap = await _db.Collection("safety_notices").Limit(100).GetSnapshotAsync();
+                var list = new List<Dictionary<string, object>>();
+                foreach (var doc in snap.Documents)
+                {
+                    var d = doc.ToDictionary();
+                    if (d.TryGetValue("active", out var a) && a is bool ab && !ab) continue;
+                    var message = GetString(d, "message");
+                    if (string.IsNullOrWhiteSpace(message)) continue;
+                    var title = GetString(d, "title");
+                    DateTime created = DateTime.MinValue;
+                    if (d.TryGetValue("createdAt", out var c) && c is Timestamp ts) created = ts.ToDateTime();
+                    list.Add(new Dictionary<string, object>
+                    {
+                        ["id"] = doc.Id,
+                        ["title"] = string.IsNullOrWhiteSpace(title) ? "Safety notice" : title,
+                        ["message"] = message,
+                        ["businessName"] = GetString(d, "businessName"),
+                        ["createdAt"] = created == DateTime.MinValue ? "" : created.ToString("o")
+                    });
+                }
+                return list.OrderByDescending(x => x["createdAt"]?.ToString() ?? "").Take(30).ToList();
+            }, new List<Dictionary<string, object>>(), "GetSafetyNotices");
+        }
 
         public async Task<Dictionary<string, object>?> GetBuyerProfileAsync(string buyerId) =>
             await ExecuteWithRetryAsync(async () =>

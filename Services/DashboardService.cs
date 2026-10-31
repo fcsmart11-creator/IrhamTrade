@@ -528,7 +528,7 @@ namespace IrhamTrade.Server.Services
             }, new List<Dictionary<string, object>>(), $"GetBusinessInterests {businessId}");
         }
 
-        // BOSS FIX RESTORED - Original authentic signature with status - Fixes CS1501 - Interest logic untouched!
+        // BOSS - RESTORED ORIGINAL AUTHENTIC SIGNATURE - Fixes CS1501 - Interest logic untouched!
         public async Task<bool> UpdateInterestStatusAsync(
             string interestId, string status, string? businessName = null, string? businessResponse = null)
         {
@@ -981,7 +981,7 @@ namespace IrhamTrade.Server.Services
             }, false, $"UpdateBuyerBasic {buyerId}");
         }
 
-        // BOSS FIX 100% - RESEND API FIRST - Fixes Render SMTP timeout - Only this method changed!
+        // BOSS FIX 100% - RESEND API - Fixes 403 gmail.com domain not verified + Render SMTP timeout - Uses onboarding@resend.dev
         private async Task<bool> SendAdminEmailAsync(string subject, string text)
         {
             var fromEmail = Environment.GetEnvironmentVariable("SMTP_EMAIL")?.Trim();
@@ -1000,9 +1000,10 @@ namespace IrhamTrade.Server.Services
                     httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {resendApiKey}");
                     var safeHtml = System.Net.WebUtility.HtmlEncode(text).Replace("\n", "<br/>");
                     var htmlBody = $"<div style='font-family:Arial,sans-serif; max-width:700px;'><h2>{System.Net.WebUtility.HtmlEncode(subject)}</h2><p>{safeHtml}</p><hr/><p style='font-size:12px;color:#888;'>IRHAM TRADE - {fromEmail}</p></div>";
+                    // BOSS FIX: Use onboarding@resend.dev - Resend allows this without domain verification - Fixes 403 Forbidden
                     var payload = new
                     {
-                        from = $"IRHAM TRADE Reports <{fromEmail}>",
+                        from = "IrhamTrade <onboarding@resend.dev>",
                         to = new[] { toEmail },
                         subject = subject,
                         html = htmlBody,
@@ -1014,47 +1015,25 @@ namespace IrhamTrade.Server.Services
                     var respBody = await response.Content.ReadAsStringAsync();
                     if (response.IsSuccessStatusCode)
                     {
-                        _logger.LogInformation("✅ Report email SENT via RESEND to {To} - Subject: {Sub}", toEmail, subject);
+                        _logger.LogInformation("✅ Report email SENT via RESEND to {To} - Subject: {Sub} - {Resp}", toEmail, subject, respBody);
                         return true;
                     }
                     else
                     {
-                        _logger.LogWarning("⚠️ Resend failed for report {Sub}: {Status} {Body} - Trying SMTP", subject, response.StatusCode, respBody);
+                        _logger.LogError("❌ Resend FAILED for report {Sub}: {Status} {Body}", subject, response.StatusCode, respBody);
+                        // Don't try Gmail SMTP on Render - It always times out on port 587 - Return false so user knows
+                        return false;
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "⚠️ Resend exception for report {Sub} - Trying SMTP", subject);
+                    _logger.LogWarning(ex, "⚠️ Resend exception for report {Sub}", subject);
+                    return false;
                 }
             }
 
-            try
-            {
-                var gmailPass = Environment.GetEnvironmentVariable("GMAIL_APP_PASSWORD")?.Trim();
-                if (string.IsNullOrWhiteSpace(gmailPass))
-                {
-                    _logger.LogWarning("❌ Report email NOT sent: GMAIL_APP_PASSWORD missing");
-                    return false;
-                }
-                gmailPass = gmailPass.Replace(" ", "").Trim();
-                using var smtp = new SmtpClient("smtp.gmail.com", 587)
-                {
-                    EnableSsl = true,
-                    UseDefaultCredentials = false,
-                    Credentials = new NetworkCredential(fromEmail, gmailPass),
-                    DeliveryMethod = SmtpDeliveryMethod.Network,
-                    Timeout = 15000
-                };
-                using var mail = new MailMessage(fromEmail, toEmail) { Subject = subject, Body = text, IsBodyHtml = false };
-                await smtp.SendMailAsync(mail);
-                _logger.LogInformation("✅ Report email SENT via Gmail to {To} - Subject: {Sub}", toEmail, subject);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "❌ Both Resend and Gmail failed for {Sub}: {Msg}", subject, ex.Message);
-                return false;
-            }
+            _logger.LogWarning("❌ RESEND_API_KEY missing - Report saved in DB but email not sent - Set RESEND_API_KEY on Render");
+            return false;
         }
 
         public async Task<(bool Ok, string Message)> SubmitSellerReportAsync(string reporterId, string businessId, string businessName, string reason, string details)
@@ -1165,7 +1144,7 @@ namespace IrhamTrade.Server.Services
 
                 _ = SendAdminEmailAsync(subject, text);
 
-                _logger.LogInformation("Seller report {ReportId} saved for {Business} ({Total} total) - Gmail email queued", reportId, businessName, total);
+                _logger.LogInformation("Seller report {ReportId} saved for {Business} ({Total} total) - Resend email queued", reportId, businessName, total);
                 return (true, "Report received. Our team will review it. Thank you for helping keep IrhamTrade safe.");
             }
             catch (Exception ex)

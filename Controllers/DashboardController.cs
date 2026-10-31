@@ -518,7 +518,6 @@ namespace IrhamTrade.Server.Controllers
                     ["createdAt"] = now
                 });
 
-                // BOSS FIX - Gmail with SAME key
                 var subject = $"[IrhamTrade Support] Message from {buyerName} - {buyerEmail}";
                 var body = $"Support message\n\nFrom: {buyerName}\nEmail: {buyerEmail}\nBuyerId: {buyerId}\n\nMessage:\n{message}\n\nTime UTC: {DateTime.UtcNow:yyyy-MM-dd HH:mm}\nDocId: {docId}";
                 await SendGmailEmailAsync(subject, body);
@@ -566,7 +565,6 @@ namespace IrhamTrade.Server.Controllers
                 var fullDetails = $"Product: {product}\nReason: {reason}\nReported via BuyerProfile Help\nBuyerEmail: {buyerEmail}\nBuyerName: {buyerName}\nMasked Code: {businessCodeMasked}";
                 var result = await _svc.SubmitSellerReportAsync(buyerId, businessId, businessName, product + " - " + reason, fullDetails);
 
-                // Save to Firestore - fraud_reports
                 try
                 {
                     var db = _firebase.FirestoreDb;
@@ -589,7 +587,6 @@ namespace IrhamTrade.Server.Controllers
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "Save fraud_reports failed"); }
 
-                // BOSS FIX 100% - SEND EMAIL VIA GMAIL USING YOUR SAME KEY - IRH-****-XXXX PROFESSIONAL
                 var subject = $"[REPORT] Fraud: {businessName} - {businessCodeMasked} - by {buyerName}";
                 var body = $"IRHAMTRADE - FRAUD BUSINESS REPORT\n\n" +
                            $"Business Name: {businessName}\n" +
@@ -621,7 +618,93 @@ namespace IrhamTrade.Server.Controllers
         [HttpGet("admin-panel")]
         public IActionResult AdminPanel()
         {
-            var html = @"... same admin panel HTML as before ...";
+            var html = @"
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>IrhamTrade Admin - Safety Notice</title>
+<style>
+body{font-family:Arial;background:#f5f5f5;margin:0;padding:20px}
+.card{background:white;padding:25px;border-radius:12px;max-width:600px;margin:30px auto;box-shadow:0 4px 20px rgba(0,0,0,0.12)}
+input,textarea,select{width:100%;padding:13px;margin:8px 0;border:1px solid #ddd;border-radius:8px;box-sizing:border-box;font-size:15px}
+button{background:#d32f2f;color:white;padding:15px;border:none;border-radius:8px;width:100%;font-weight:bold;cursor:pointer;font-size:16px;margin-top:10px}
+button:disabled{background:#999}
+.success{background:#4caf50;color:white;padding:12px;border-radius:8px;margin:12px 0;display:none;text-align:center}
+.error{background:#f44336;color:white;padding:12px;border-radius:8px;margin:12px 0;display:none;text-align:center}
+h2{color:#d32f2f;text-align:center;margin:0 0 5px 0}
+label{font-weight:bold;margin-top:12px;display:block;font-size:14px;color:#333}
+small{color:#888;display:block;text-align:center;margin-top:15px}
+a{color:#d32f2f;text-decoration:none}
+</style>
+</head>
+<body>
+<div class='card'>
+<h2>🔐 IrhamTrade Admin Panel</h2>
+<p style='text-align:center;color:#666;margin-top:0'>Publish safety announcements to all buyers</p>
+<div id='success' class='success'></div>
+<div id='error' class='error'></div>
+<label>Title * (min 3 chars)</label>
+<input id='title' placeholder='Example: Safety Alert - Beware of Scammers' maxlength='100'>
+<label>Type *</label>
+<select id='type'><option value='info'>Info - Blue</option><option value='warning'>Warning - Orange</option><option value='alert'>Alert - Red</option><option value='success'>Success - Green</option></select>
+<label>Message * (min 10 chars)</label>
+<textarea id='message' rows='6' placeholder='Dear customers, please be careful of sellers asking for advance payment...' maxlength='2000'></textarea>
+<button id='btn' onclick='publish()'>📢 Publish Announcement</button>
+<p style='text-align:center;margin-top:15px'><a href='/api/Support/notices' target='_blank'>View Live Notices (JSON)</a> | <a href='/api/dashboard/safety-notices' target='_blank'>API Safety Notices</a></p>
+<small>Server: irhamtrade.onrender.com | irhamtradesupport@gmail.com<br>All buyers will see this in Profile > Help > Safety Notices</small>
+</div>
+<script>
+async function publish(){
+  const title=document.getElementById('title').value.trim();
+  const message=document.getElementById('message').value.trim();
+  const type=document.getElementById('type').value;
+  const success=document.getElementById('success');
+  const error=document.getElementById('error');
+  const btn=document.getElementById('btn');
+  success.style.display='none'; error.style.display='none';
+  if(title.length<3){error.textContent='Title must be at least 3 characters'; error.style.display='block'; return;}
+  if(message.length<10){error.textContent='Message must be at least 10 characters'; error.style.display='block'; return;}
+  btn.disabled=true; btn.textContent='⏳ Publishing... Please wait 60s - Waking server...';
+  for(let i=0;i<3;i++){
+    try{
+      const controller=new AbortController();
+      const timeout=setTimeout(()=>controller.abort(),60000);
+      const res=await fetch('/api/Support/announce',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({title,message,type}),
+        signal:controller.signal
+      });
+      clearTimeout(timeout);
+      const data=await res.json();
+      if(res.ok && data.success){
+        success.textContent='✅ Published! Live for all users. ID: '+data.id;
+        success.style.display='block';
+        document.getElementById('title').value='';
+        document.getElementById('message').value='';
+        btn.disabled=false; btn.textContent='📢 Publish Announcement';
+        return;
+      }else{
+        throw new Error(data.message||'Failed to publish');
+      }
+    }catch(e){
+      if(i===2){
+        error.textContent='❌ Failed: '+e.message+'. Server may be sleeping. Wait 1 minute and try again.';
+        error.style.display='block';
+        btn.disabled=false; btn.textContent='📢 Publish Announcement';
+        return;
+      }
+      btn.textContent='⏳ Server waking up... Retry '+(i+1)+'/3 - Wait 10 sec...';
+      await new Promise(r=>setTimeout(r,10000));
+    }
+  }
+}
+</script>
+</body>
+</html>
+";
             return Content(html, "text/html");
         }
 

@@ -158,7 +158,6 @@ namespace IrhamTrade.Server.Controllers
             return Ok(await _svc.GetBuyerInterestsAsync(buyerId));
         }
 
-        // BOSS FIX PROFESSIONAL: Get buyer history - Enforces IsBadId - New UID xyz789 = Empty Fresh! Old UID abc123 login = Full history Restore! Facebook standard!
         [HttpGet("buyer-history/{buyerId}")]
         public async Task<IActionResult> GetBuyerHistory(string buyerId)
         {
@@ -180,7 +179,6 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        // ===== NEW FIX - SAFETY NOTICES FALLBACK - FOR BuyerProfile =====
         [HttpGet("safety-notices")]
         public async Task<IActionResult> GetSafetyNotices()
         {
@@ -189,7 +187,6 @@ namespace IrhamTrade.Server.Controllers
         }
     }
 
-    // Purpose: Interests Controller - RESTful interests - Accept 4 JOBS, Decline 3 JOBS - Never returns old pending
     [ApiController]
     [Route("api/[controller]")]
     public class InterestsController : ControllerBase
@@ -321,7 +318,6 @@ namespace IrhamTrade.Server.Controllers
         }
     }
 
-    // Purpose: Transactions Controller - Complete/Incomplete/Delete - Professional
     [ApiController]
     [Route("api/[controller]")]
     public class TransactionsController : ControllerBase
@@ -373,7 +369,6 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex) { _logger.LogError(ex, "Delete transaction failed {Id}", transactionId); return Ok(new { success = true, message = "Transaction deleted (fallback)" }); }
         }
 
-        // BOSS FIX: buyer-history via Transactions controller - Same IsBadId enforcement - Fresh vs Restore
         [HttpPost("buyer-history")]
         public async Task<IActionResult> CreateBuyerHistory([FromBody] Dictionary<string, object> data)
         {
@@ -406,8 +401,6 @@ namespace IrhamTrade.Server.Controllers
         }
     }
 
-    // ===== NEW FIX BOSS - SUPPORT CONTROLLER INSIDE SAME FILE - NO UGLY NEW FILE NAME - PROFESSIONAL =====
-    // This handles BuyerProfile calls: /api/Support/notices, /api/Support/contact, /api/Support/report-business
     [ApiController]
     [Route("api/[controller]")]
     public class SupportController : ControllerBase
@@ -442,7 +435,6 @@ namespace IrhamTrade.Server.Controllers
             return "";
         }
 
-        // GET api/Support/notices - For BuyerProfile spacious feed
         [HttpGet("notices")]
         public async Task<IActionResult> GetNotices()
         {
@@ -450,7 +442,6 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex) { _logger.LogError(ex, "Support notices failed"); return Ok(new List<Dictionary<string, object>>()); }
         }
 
-        // POST api/Support/contact - Sends to irhamtradesupport@gmail.com
         [HttpPost("contact")]
         public async Task<IActionResult> Contact([FromBody] Dictionary<string, object> data)
         {
@@ -482,7 +473,6 @@ namespace IrhamTrade.Server.Controllers
                     ["createdAt"] = now
                 });
 
-                // Email to admin via Resend - env vars
                 try
                 {
                     var apiKey = Environment.GetEnvironmentVariable("RESEND_API_KEY");
@@ -517,7 +507,6 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex) { _logger.LogError(ex, "Contact failed"); return Ok(new { success = true, message = "Message saved - will be reviewed" }); }
         }
 
-        // POST api/Support/report-business - Fraud report with autocomplete businessId
         [HttpPost("report-business")]
         public async Task<IActionResult> ReportBusiness([FromBody] Dictionary<string, object> data)
         {
@@ -549,11 +538,9 @@ namespace IrhamTrade.Server.Controllers
                 if (string.IsNullOrWhiteSpace(reason) || reason.Length < 10)
                     return BadRequest(new { success = false, message = "Reason must be at least 10 characters" });
 
-                // Use existing service method - it handles daily limit, reporter verification, email
                 var fullDetails = $"Product: {product}\nReason: {reason}\nReported via BuyerProfile Help\nBuyerEmail: {buyerEmail}\nBuyerName: {buyerName}";
                 var result = await _svc.SubmitSellerReportAsync(buyerId, businessId, businessName, product + " - " + reason, fullDetails);
 
-                // Also save extra fraud collection for your admin panel if needed
                 try
                 {
                     var db = _firebase.FirestoreDb;
@@ -583,58 +570,128 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex) { _logger.LogError(ex, "Report business failed"); return StatusCode(500, new { success = false, message = ex.Message }); }
         }
 
-        // ===== WAY 2 BOSS - ADMIN PANEL - POST ANNOUNCEMENT LIKE EMAIL - FUTURE ADMIN APP REUSE =====
         [HttpGet("admin-panel")]
         public IActionResult AdminPanel()
         {
             var html = @"
-<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>IrhamTrade Admin - Post Announcement</title>
 <style>
-body{font-family:Inter,system-ui;padding:20px;background:#f5f7fb;color:#111}
-.card{max-width:600px;margin:20px auto;background:#fff;padding:24px;border-radius:16px;box-shadow:0 8px 30px rgba(0,0,0,.08)}
-h2{margin:0 0 8px} p{color:#666;margin:0 0 18px}
-input,textarea,select{width:100%;padding:12px 14px;border:1px solid #ddd;border-radius:10px;margin:8px 0 14px;font-size:15px;box-sizing:border-box}
-button{width:100%;padding:13px;background:#0f172a;color:#fff;border:0;border-radius:12px;font-weight:700;font-size:16px;cursor:pointer}
-button:disabled{opacity:.6} .ok{background:#ecfdf5;color:#065f46;padding:12px;border-radius:10px;margin-top:14px;display:none}
-.err{background:#fef2f2;color:#991b1b;padding:12px;border-radius:10px;margin-top:14px;display:none}
-label{font-weight:600;font-size:13px;color:#333}
-</style></head><body>
-<div class='card'>
-<h2>IrhamTrade - Post Announcement Boss</h2>
-<p>This will appear in Buyer App > Help & Support > Announcements & Safety Notices (spacious 420). Also future Admin App will reuse same API.</p>
-<label>Title</label>
-<input id='title' placeholder='e.g. Beware of Fake Sellers - Meet in Public'/>
-<label>Message (spacious)</label>
-<textarea id='message' rows='5' placeholder='e.g. For your safety Boss - Always meet sellers in public places like Irham Trade office, Police station, Mall. Never send money before seeing device. Check IMEI.'></textarea>
-<label>Type</label>
-<select id='type'><option value='warning'>warning</option><option value='info' selected>info</option><option value='success'>success</option><option value='alert'>alert</option></select>
-<button id='btn' onclick='postAnn()'>POST ANNOUNCEMENT Boss</button>
-<div id='ok' class='ok'></div>
-<div id='err' class='err'></div>
-<hr style='margin:20px 0;border:0;border-top:1px solid #eee'>
-<a href='/api/Support/notices' target='_blank'>View Live Notices JSON (Buyer App sees this)</a> | 
-<a href='/api/dashboard/safety-notices' target='_blank'>View Safety Fallback</a>
+:root{--bg:#f5f7fb;--card:#ffffff;--text:#111827;--muted:#6b7280;--border:#e5e7eb;--primary:#0f172a;--primary-hover:#1e293b;--ok-bg:#ecfdf5;--ok-text:#065f46;--err-bg:#fef2f2;--err-text:#991b1b}
+*{box-sizing:border-box}
+body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:24px;background:var(--bg);color:var(--text)}
+.container{max-width:640px;margin:32px auto}
+.header{margin-bottom:20px}
+.header h1{font-size:22px;font-weight:700;margin:0 0 6px}
+.header p{font-size:14px;color:var(--muted);margin:0}
+.card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;box-shadow:0 8px 24px rgba(15,23,42,0.06)}
+label{display:block;font-size:13px;font-weight:600;margin:14px 0 6px;color:#374151}
+label:first-of-type{margin-top:0}
+input,textarea,select{width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;outline:none;transition:border .15s}
+input:focus,textarea:focus,select:focus{border-color:#94a3b8}
+textarea{resize:vertical;min-height:120px}
+.row{display:flex;gap:12px;margin-top:20px}
+.btn{flex:1;padding:12px 16px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all .15s}
+.btn-primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.btn-primary:hover{background:var(--primary-hover)}
+.btn-primary:disabled{opacity:.6;cursor:not-allowed}
+.btn-secondary{background:#fff;color:var(--text);border-color:var(--border)}
+.btn-secondary:hover{background:#f9fafb}
+.status{padding:12px 14px;border-radius:10px;font-size:13px;margin-top:16px;display:none;line-height:1.5}
+.status.ok{display:block;background:var(--ok-bg);color:var(--ok-text);border:1px solid #a7f3d0}
+.status.err{display:block;background:var(--err-bg);color:var(--err-text);border:1px solid #fecaca}
+.footer{margin-top:16px;text-align:center}
+.footer a{font-size:12px;color:var(--muted);text-decoration:none}
+.footer a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class='container'>
+<div class='header'>
+<h1>Post Announcement</h1>
+<p>Create and publish announcements for the buyer app.</p>
 </div>
+<div class='card'>
+<label for='title'>Title</label>
+<input id='title' type='text' placeholder='Announcement title'>
+
+<label for='message'>Message</label>
+<textarea id='message' placeholder='Enter announcement message'></textarea>
+
+<label for='type'>Type</label>
+<select id='type'>
+<option value='info' selected>Info</option>
+<option value='warning'>Warning</option>
+<option value='success'>Success</option>
+<option value='alert'>Alert</option>
+</select>
+
+<div class='row'>
+<button id='btnPublish' class='btn btn-primary' onclick='publish()'>Publish</button>
+<button class='btn btn-secondary' onclick='viewAnnouncements()'>View Announcements</button>
+</div>
+
+<div id='ok' class='status ok'></div>
+<div id='err' class='status err'></div>
+</div>
+<div class='footer'>
+<a href='/api/Support/notices' target='_blank'>API: /api/Support/notices</a>
+</div>
+</div>
+
 <script>
-async function postAnn(){
- var btn=document.getElementById('btn'), ok=document.getElementById('ok'), err=document.getElementById('err');
- ok.style.display='none'; err.style.display='none';
- var title=document.getElementById('title').value.trim();
- var message=document.getElementById('message').value.trim();
- var type=document.getElementById('type').value;
- if(title.length<3){err.textContent='Title must be >=3 chars Boss'; err.style.display='block'; return;}
- if(message.length<10){err.textContent='Message must be >=10 chars Boss'; err.style.display='block'; return;}
- btn.disabled=true; btn.textContent='Posting...';
- try{
-  var r=await fetch('/api/Support/announce',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title, message, type})});
-  var j=await r.json();
-  if(r.ok && j.success){ok.textContent='SUCCESS Boss! Posted: '+title+' - App will show on Refresh! ID:'+(j.id||''); ok.style.display='block'; document.getElementById('message').value='';}
-  else{err.textContent=(j.message||'Failed Boss'); err.style.display='block';}
- }catch(e){err.textContent='Network error Boss: '+e; err.style.display='block';}
- btn.disabled=false; btn.textContent='POST ANNOUNCEMENT Boss';
+function viewAnnouncements(){
+  window.open('/api/Support/notices','_blank');
 }
-</script></body></html>";
+async function publish(){
+  const btn=document.getElementById('btnPublish');
+  const ok=document.getElementById('ok');
+  const err=document.getElementById('err');
+  ok.style.display='none'; ok.className='status ok';
+  err.style.display='none'; err.className='status err';
+
+  const title=document.getElementById('title').value.trim();
+  const message=document.getElementById('message').value.trim();
+  const type=document.getElementById('type').value;
+
+  if(title.length<3){ err.textContent='Title must be at least 3 characters.'; err.style.display='block'; return; }
+  if(message.length<10){ err.textContent='Message must be at least 10 characters.'; err.style.display='block'; return; }
+
+  btn.disabled=true;
+  const originalText=btn.textContent;
+  btn.textContent='Publishing...';
+
+  try{
+    const res=await fetch('/api/Support/announce',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({title, message, type})
+    });
+    const data=await res.json();
+    if(res.ok && data.success){
+      ok.textContent='Announcement published successfully.';
+      ok.style.display='block';
+      document.getElementById('title').value='';
+      document.getElementById('message').value='';
+    }else{
+      err.textContent=data.message || 'Failed to publish announcement.';
+      err.style.display='block';
+    }
+  }catch(e){
+    err.textContent='Network error. Please try again.';
+    err.style.display='block';
+  }finally{
+    btn.disabled=false;
+    btn.textContent=originalText;
+  }
+}
+</script>
+</body>
+</html>";
             return Content(html, "text/html");
         }
 
@@ -643,7 +700,7 @@ async function postAnn(){
         {
             try
             {
-                if (data == null) return BadRequest(new { success = false, message = "Data required Boss" });
+                if (data == null) return BadRequest(new { success = false, message = "Data is required." });
                 var title = GetString(data, "title");
                 var message = GetString(data, "message");
                 if (string.IsNullOrWhiteSpace(message)) message = GetString(data, "body");
@@ -651,9 +708,9 @@ async function postAnn(){
                 if (string.IsNullOrWhiteSpace(type)) type = "info";
 
                 if (string.IsNullOrWhiteSpace(title) || title.Length < 3)
-                    return BadRequest(new { success = false, message = "Title must be at least 3 characters Boss" });
+                    return BadRequest(new { success = false, message = "Title must be at least 3 characters." });
                 if (string.IsNullOrWhiteSpace(message) || message.Length < 10)
-                    return BadRequest(new { success = false, message = "Message must be at least 10 characters Boss" });
+                    return BadRequest(new { success = false, message = "Message must be at least 10 characters." });
 
                 var db = _firebase.FirestoreDb;
                 var docId = Guid.NewGuid().ToString("N");
@@ -666,23 +723,22 @@ async function postAnn(){
                     ["type"] = type,
                     ["priority"] = type == "warning" || type == "alert" ? "high" : "normal",
                     ["createdAt"] = now,
-                    ["createdBy"] = "admin-panel",
+                    ["createdBy"] = "admin",
                     ["isActive"] = true
                 };
                 await db.Collection("safety_notices").Document(docId).SetAsync(doc);
 
-                _logger.LogInformation("BOSS Announcement posted {DocId} Title {Title}", docId, title);
-                return Ok(new { success = true, id = docId, message = "Announcement posted Boss - Buyer App will show instantly!" });
+                _logger.LogInformation("Announcement published {DocId} Title {Title}", docId, title);
+                return Ok(new { success = true, id = docId, message = "Announcement published successfully." });
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Announce failed Boss");
-                return StatusCode(500, new { success = false, message = ex.Message });
+                _logger.LogError(ex, "Failed to publish announcement");
+                return StatusCode(500, new { success = false, message = "An error occurred while publishing." });
             }
         }
     }
 
-    // Purpose: Push notifications - register/unregister phone tokens, serve the product picture for the alert, status check
     [ApiController]
     [Route("api/[controller]")]
     public class PushController : ControllerBase

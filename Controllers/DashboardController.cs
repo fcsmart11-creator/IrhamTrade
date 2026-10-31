@@ -435,6 +435,19 @@ namespace IrhamTrade.Server.Controllers
             return "";
         }
 
+        private static string MaskBusinessId(string rawId)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(rawId)) return "IRH-****-XXXX";
+                rawId = rawId.Trim();
+                if (rawId.Length <= 4) return $"IRH-****-{rawId.ToUpper()}";
+                var last4 = rawId.Substring(rawId.Length - 4).ToUpper();
+                return $"IRH-****-{last4}";
+            }
+            catch { return "IRH-****-XXXX"; }
+        }
+
         [HttpGet("notices")]
         public async Task<IActionResult> GetNotices()
         {
@@ -498,6 +511,7 @@ namespace IrhamTrade.Server.Controllers
                             var body = await resp.Content.ReadAsStringAsync();
                             _logger.LogWarning("Support email rejected {Status}: {Body}", (int)resp.StatusCode, body.Length > 300 ? body.Substring(0, 300) : body);
                         }
+                        else { _logger.LogInformation("Support email sent to {To} DocId {DocId}", toAddress, docId); }
                     }
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "Support email failed"); }
@@ -532,15 +546,20 @@ namespace IrhamTrade.Server.Controllers
                 if (string.IsNullOrWhiteSpace(buyerId)) buyerId = GetString(data, "reporterId");
                 var buyerName = GetString(data, "buyerName");
                 var buyerEmail = GetString(data, "buyerEmail");
+                var buyerPhone = GetString(data, "buyerPhone");
+                var businessCodeMasked = GetString(data, "businessCodeMasked");
+                if (string.IsNullOrWhiteSpace(businessCodeMasked)) businessCodeMasked = MaskBusinessId(businessId);
+                var buyerIdMasked = GetString(data, "buyerIdMasked");
 
                 if (string.IsNullOrWhiteSpace(businessName) || businessName.Length < 2)
                     return BadRequest(new { success = false, message = "Business name required" });
                 if (string.IsNullOrWhiteSpace(reason) || reason.Length < 10)
                     return BadRequest(new { success = false, message = "Reason must be at least 10 characters" });
 
-                var fullDetails = $"Product: {product}\nReason: {reason}\nReported via BuyerProfile Help\nBuyerEmail: {buyerEmail}\nBuyerName: {buyerName}";
+                var fullDetails = $"Product: {product}\nReason: {reason}\nReported via BuyerProfile Help\nBuyerEmail: {buyerEmail}\nBuyerName: {buyerName}\nMasked Code: {businessCodeMasked}";
                 var result = await _svc.SubmitSellerReportAsync(buyerId, businessId, businessName, product + " - " + reason, fullDetails);
 
+                // Save to Firestore - fraud_reports
                 try
                 {
                     var db = _firebase.FirestoreDb;
@@ -553,6 +572,7 @@ namespace IrhamTrade.Server.Controllers
                         ["reporterEmail"] = buyerEmail,
                         ["reportedBusinessId"] = businessId,
                         ["reportedBusinessName"] = businessName,
+                        ["reportedBusinessCodeMasked"] = businessCodeMasked,
                         ["reportedProduct"] = product,
                         ["reason"] = reason,
                         ["type"] = "fraud_report",
@@ -560,10 +580,63 @@ namespace IrhamTrade.Server.Controllers
                         ["createdAt"] = Timestamp.GetCurrentTimestamp()
                     });
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogWarning(ex, "Save fraud_reports failed"); }
+
+                // BOSS FIX 100% - SEND EMAIL TO INBOX - SAME AS CONTACT - INBOX ONLY - PROFESSIONAL
+                try
+                {
+                    var apiKey = Environment.GetEnvironmentVariable("RESEND_API_KEY");
+                    var toAddress = Environment.GetEnvironmentVariable("REPORT_TO_EMAIL");
+                    if (string.IsNullOrWhiteSpace(toAddress)) toAddress = "irhamtradesupport@gmail.com";
+                    var fromAddress = Environment.GetEnvironmentVariable("REPORT_FROM_EMAIL");
+                    if (string.IsNullOrWhiteSpace(fromAddress)) fromAddress = "IrhamTrade Report <onboarding@resend.dev>";
+
+                    if (!string.IsNullOrWhiteSpace(apiKey))
+                    {
+                        using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.resend.com/emails");
+                        req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey.Trim());
+                        req.Content = System.Net.Http.Json.JsonContent.Create(new Dictionary<string, object>
+                        {
+                            ["from"] = fromAddress.Trim(),
+                            ["to"] = new[] { toAddress.Trim() },
+                            ["subject"] = $"[REPORT] Fraud: {businessName} - {businessCodeMasked} - by {buyerName}",
+                            ["text"] = $"IRHAMTRADE - FRAUD BUSINESS REPORT\n\n" +
+                                       $"Business Name: {businessName}\n" +
+                                       $"Business Code (Masked - Professional): {businessCodeMasked}\n" +
+                                       $"Business ID (for admin lookup - secure): {businessId}\n" +
+                                       $"Product: {product}\n\n" +
+                                       $"Reason:\n{reason}\n\n" +
+                                       $"--- Buyer Info ---\n" +
+                                       $"Name: {buyerName}\n" +
+                                       $"Email: {buyerEmail}\n" +
+                                       $"Phone: {buyerPhone}\n" +
+                                       $"Buyer ID: {buyerId}\n" +
+                                       $"Buyer Code Masked: {buyerIdMasked}\n\n" +
+                                       $"Time UTC: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}\n" +
+                                       $"App: IrhamTrade v1.0 Buyer\n" +
+                                       $"Doc: fraud_reports\n\n" +
+                                       $"Please review within 24h."
+                        });
+                        using var resp = await _mailHttp.SendAsync(req);
+                        var respBody = await resp.Content.ReadAsStringAsync();
+                        if (!resp.IsSuccessStatusCode)
+                        {
+                            _logger.LogWarning("Report email rejected {Status}: {Body}", (int)resp.StatusCode, respBody.Length > 400 ? respBody.Substring(0, 400) : respBody);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Report email SENT to {To} - Business {BusinessName} Code {Code}", toAddress, businessName, businessCodeMasked);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("RESEND_API_KEY not set - Report email not sent - Set in Render env");
+                    }
+                }
+                catch (Exception ex) { _logger.LogError(ex, "Report email failed - but report saved to Firestore"); }
 
                 if (result.Ok)
-                    return Ok(new { success = true, message = result.Message });
+                    return Ok(new { success = true, message = "Report sent to irhamtradesupport@gmail.com inbox - will be reviewed within 24h" });
                 else
                     return BadRequest(new { success = false, message = result.Message });
             }

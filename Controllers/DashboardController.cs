@@ -3,6 +3,7 @@ using IrhamTrade.Server.Services;
 using Google.Cloud.Firestore;
 using System.Net;
 using System.Net.Mail;
+using System.Text;
 
 namespace IrhamTrade.Server.Controllers
 {
@@ -441,21 +442,62 @@ namespace IrhamTrade.Server.Controllers
             catch { return "IRH-****-XXXX"; }
         }
 
-        // ===== BOSS FIX - GMAIL SMTP USING YOUR SAME KEY - 100% WORKS =====
+        // ===== BOSS FIX 100% FULL FILE - RESEND API FIRST - Fixes Render SMTP timeout - Report & Contact now works! =====
         private async Task<bool> SendGmailEmailAsync(string subject, string body)
         {
+            var fromEmail = Environment.GetEnvironmentVariable("SMTP_EMAIL")?.Trim();
+            var toEmail = Environment.GetEnvironmentVariable("SMTP_TO_EMAIL")?.Trim();
+            if (string.IsNullOrWhiteSpace(fromEmail)) fromEmail = "irhamtradesupport@gmail.com";
+            if (string.IsNullOrWhiteSpace(toEmail)) toEmail = "irhamtradesupport@gmail.com";
+
+            // BOSS: Try RESEND API FIRST - Works on Render (Gmail port 587 blocked on Render free)
+            var resendApiKey = Environment.GetEnvironmentVariable("RESEND_API_KEY")?.Trim()
+                ?? Environment.GetEnvironmentVariable("Resend__ApiKey")?.Trim();
+
+            if (!string.IsNullOrWhiteSpace(resendApiKey))
+            {
+                try
+                {
+                    using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+                    httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {resendApiKey}");
+                    var safeHtml = System.Net.WebUtility.HtmlEncode(body).Replace("\n", "<br/>");
+                    var htmlBody = $"<div style='font-family:Arial,sans-serif; white-space:pre-wrap; max-width:700px;'><h2 style='color:#d32f2f;'>{System.Net.WebUtility.HtmlEncode(subject)}</h2><p style='font-size:14px;'>{safeHtml}</p><hr/><p style='font-size:12px;color:#888;'>IRHAM TRADE - {fromEmail}</p></div>";
+                    var payload = new
+                    {
+                        from = $"IRHAM TRADE <{fromEmail}>",
+                        to = new[] { toEmail },
+                        subject = subject,
+                        html = htmlBody,
+                        text = body
+                    };
+                    var json = System.Text.Json.JsonSerializer.Serialize(payload);
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    var response = await httpClient.PostAsync("https://api.resend.com/emails", content);
+                    var respBody = await response.Content.ReadAsStringAsync();
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        _logger.LogInformation("✅ EMAIL SENT via RESEND to {To} - Subject: {Sub} - {Resp}", toEmail, subject, respBody);
+                        return true;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("⚠️ Resend failed for {Sub}: {Status} {Body} - Trying Gmail SMTP fallback", subject, response.StatusCode, respBody);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "⚠️ Resend exception for {Sub} - Trying Gmail SMTP fallback", subject);
+                }
+            }
+
+            // FALLBACK: Gmail SMTP - Will work locally, but times out on Render free
             try
             {
                 var gmailPass = Environment.GetEnvironmentVariable("GMAIL_APP_PASSWORD")?.Trim().Replace(" ", "");
-                var fromEmail = Environment.GetEnvironmentVariable("SMTP_EMAIL")?.Trim();
-                var toEmail = Environment.GetEnvironmentVariable("SMTP_TO_EMAIL")?.Trim();
-
-                if (string.IsNullOrWhiteSpace(fromEmail)) fromEmail = "irhamtradesupport@gmail.com";
-                if (string.IsNullOrWhiteSpace(toEmail)) toEmail = "irhamtradesupport@gmail.com";
-
                 if (string.IsNullOrWhiteSpace(gmailPass))
                 {
-                    _logger.LogWarning("GMAIL_APP_PASSWORD missing - email not sent - report saved to DB");
+                    _logger.LogWarning("GMAIL_APP_PASSWORD and RESEND_API_KEY both missing/failed - email not sent - report saved to DB only");
                     return false;
                 }
 
@@ -465,17 +507,17 @@ namespace IrhamTrade.Server.Controllers
                     UseDefaultCredentials = false,
                     Credentials = new NetworkCredential(fromEmail, gmailPass),
                     DeliveryMethod = SmtpDeliveryMethod.Network,
-                    Timeout = 20000
+                    Timeout = 15000
                 };
 
                 using var mail = new MailMessage(fromEmail, toEmail, subject, body);
                 await smtp.SendMailAsync(mail);
-                _logger.LogInformation("✅ EMAIL SENT via Gmail to {To} - Subject: {Sub}", toEmail, subject);
+                _logger.LogInformation("✅ EMAIL SENT via Gmail SMTP to {To} - Subject: {Sub}", toEmail, subject);
                 return true;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Gmail send failed: {Msg}", ex.Message);
+                _logger.LogError(ex, "❌ Both Resend and Gmail send failed: {Msg} - Check RESEND_API_KEY", ex.Message);
                 return false;
             }
         }

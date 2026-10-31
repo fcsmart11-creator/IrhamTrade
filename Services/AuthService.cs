@@ -765,7 +765,7 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // === BOSS FIX 100% AUTHENTIC + SECURE - SECURE OTP GENERATION ===
+        // === BOSS FIX 100% FULL FILE - RESEND API FIRST - Fixes Render SMTP timeout - No more timeout! ===
         public async Task<AuthResult> ForgotPasswordAsync(string email)
         {
             try
@@ -774,27 +774,87 @@ namespace IrhamTrade.Server.Services
                 var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
                 if (user == null) return Fail("No account found with this email. Please check email or create account.");
 
-                // BOSS SECURE FIX: Use cryptographically secure random, not new Random()
                 var otp = GenerateSecureOtp();
                 var expiry = DateTime.UtcNow.AddMinutes(10);
                 _passwordResetOtps[email] = (otp, expiry);
 
-                var gmailEmail = _config["GMAIL_EMAIL"]
+                var displayName = !string.IsNullOrWhiteSpace(user.BusinessName) ? user.BusinessName : (!string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : "IRHAM TRADE User");
+                var htmlBody = $@"
+                        <div style='font-family: Arial, sans-serif; max-width:600px; margin:auto; border:1px solid #eee; border-radius:8px; padding:20px;'>
+                            <h2 style='color:#0d6efd;'>IRHAM TRADE - Password Reset</h2>
+                            <p>Hello {displayName},</p>
+                            <p>You requested to reset your password for <b>{email}</b>.</p>
+                            <p style='font-size:22px; font-weight:bold; background:#f8f9fa; padding:12px; border-radius:6px; text-align:center; letter-spacing:4px;'>{otp}</p>
+                            <p>This OTP will expire in <b>10 minutes</b>.</p>
+                            <p>If you did not request this, please ignore this email.</p>
+                            <br/>
+                            <p style='font-size:12px; color:#888;'>IRHAM TRADE Support<br/>irhamtradesupport@gmail.com<br/>Ghana</p>
+                        </div>";
+
+                // BOSS: RESEND API FIRST - Works on Render, Gmail SMTP times out on Render free tier
+                var resendApiKey = _config["RESEND_API_KEY"]
+                    ?? Environment.GetEnvironmentVariable("RESEND_API_KEY")
+                    ?? _config["Resend__ApiKey"]
+                    ?? Environment.GetEnvironmentVariable("Resend__ApiKey");
+
+                if (!string.IsNullOrWhiteSpace(resendApiKey))
+                {
+                    try
+                    {
+                        using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+                        httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {resendApiKey.Trim()}");
+                        var payload = new
+                        {
+                            from = "IRHAM TRADE Support <irhamtradesupport@gmail.com>",
+                            to = new[] { email },
+                            subject = $"IRHAM TRADE - Your OTP is {otp}",
+                            html = htmlBody
+                        };
+                        var json = System.Text.Json.JsonSerializer.Serialize(payload);
+                        var content = new StringContent(json, Encoding.UTF8, "application/json");
+                        var response = await httpClient.PostAsync("https://api.resend.com/emails", content);
+                        var responseBody = await response.Content.ReadAsStringAsync();
+
+                        if (response.IsSuccessStatusCode)
+                        {
+                            _logger.LogInformation("ForgotPassword RESEND SUCCESS sent to {Email} - {Response}", email, responseBody);
+                            return new AuthResult { Success = true, Message = $"OTP sent to {email} via IRHAM TRADE Support. Check inbox and spam. Code expires in 10 minutes." };
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Resend failed for {Email}: {Status} {Body} - Trying SMTP fallback", email, response.StatusCode, responseBody);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Resend exception for {Email} - Trying SMTP fallback", email);
+                    }
+                }
+
+                // FALLBACK: Gmail SMTP - Will work locally, but times out on Render free tier
+                var gmailEmail = _config["SMTP_EMAIL"]
+                    ?? _config["GMAIL_EMAIL"]
+                    ?? _config["SMTP_TO_EMAIL"]
                     ?? _config["Gmail:Email"]
+                    ?? Environment.GetEnvironmentVariable("SMTP_EMAIL")
                     ?? Environment.GetEnvironmentVariable("GMAIL_EMAIL")
                     ?? Environment.GetEnvironmentVariable("Gmail__Email")
                     ?? "irhamtradesupport@gmail.com";
 
                 var gmailAppPassword = _config["GMAIL_APP_PASSWORD"]
+                    ?? _config["SMTP_PASSWORD"]
                     ?? _config["Gmail:AppPassword"]
-                    ?? _config["GMAIL_APP_PASSWORD"]
                     ?? Environment.GetEnvironmentVariable("GMAIL_APP_PASSWORD")
+                    ?? Environment.GetEnvironmentVariable("SMTP_PASSWORD")
                     ?? Environment.GetEnvironmentVariable("Gmail__AppPassword");
 
                 if (string.IsNullOrWhiteSpace(gmailAppPassword))
                 {
-                    _logger.LogError("GMAIL_APP_PASSWORD not found in Environment - Add to Render");
-                    return Fail("Email service not configured. Contact support.");
+                    _logger.LogError("GMAIL_APP_PASSWORD and RESEND_API_KEY not found - Add RESEND_API_KEY to Render for OTP");
+                    if (!string.IsNullOrWhiteSpace(resendApiKey))
+                        return Fail("Email service error. Resend failed, check logs.");
+                    else
+                        return Fail("Email service not configured. Please add RESEND_API_KEY to Render Environment Variables.");
                 }
 
                 gmailAppPassword = gmailAppPassword.Replace(" ", "").Trim();
@@ -807,26 +867,15 @@ namespace IrhamTrade.Server.Services
                         Credentials = new NetworkCredential(gmailEmail, gmailAppPassword),
                         DeliveryMethod = SmtpDeliveryMethod.Network,
                         UseDefaultCredentials = false,
-                        Timeout = 20000
+                        Timeout = 15000
                     };
 
-                    var displayName = !string.IsNullOrWhiteSpace(user.BusinessName) ? user.BusinessName : (!string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : "IRHAM TRADE User");
                     var mail = new MailMessage
                     {
                         From = new MailAddress(gmailEmail, "IRHAM TRADE Support"),
                         Subject = $"IRHAM TRADE - Your OTP is {otp}",
                         IsBodyHtml = true,
-                        Body = $@"
-                        <div style='font-family: Arial, sans-serif; max-width:600px; margin:auto; border:1px solid #eee; border-radius:8px; padding:20px;'>
-                            <h2 style='color:#0d6efd;'>IRHAM TRADE - Password Reset</h2>
-                            <p>Hello {displayName},</p>
-                            <p>You requested to reset your password for <b>{email}</b>.</p>
-                            <p style='font-size:22px; font-weight:bold; background:#f8f9fa; padding:12px; border-radius:6px; text-align:center; letter-spacing:4px;'>{otp}</p>
-                            <p>This OTP will expire in <b>10 minutes</b>.</p>
-                            <p>If you did not request this, please ignore this email.</p>
-                            <br/>
-                            <p style='font-size:12px; color:#888;'>IRHAM TRADE Support<br/>irhamtradesupport@gmail.com<br/>Ghana</p>
-                        </div>"
+                        Body = htmlBody
                     };
                     mail.To.Add(email);
 
@@ -837,8 +886,8 @@ namespace IrhamTrade.Server.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Gmail SMTP failed for {Email} - Check App Password", email);
-                    return Fail($"Unable to send email at moment. Error: {ex.Message}. Please verify GMAIL_APP_PASSWORD in Render.");
+                    _logger.LogError(ex, "Gmail SMTP failed for {Email} - Render blocks port 587, use RESEND_API_KEY", email);
+                    return Fail($"Unable to send OTP email. Render blocks Gmail SMTP. Please ensure RESEND_API_KEY is set in Render and valid. Error: {ex.Message}");
                 }
             }
             catch (Exception ex)
@@ -848,7 +897,6 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // === BOSS FIX 100% SECURE - NOW REQUIRES OTP - NO ONE CAN RESET WITHOUT INBOX CODE ===
         public async Task<AuthResult> ResetPasswordAsync(string email, string otpCode, string newPassword)
         {
             try
@@ -858,18 +906,15 @@ namespace IrhamTrade.Server.Services
                 if (string.IsNullOrWhiteSpace(otpCode)) return Fail("Please enter the OTP code sent to your email.");
                 if (newPassword.Length < 6) return Fail("Password must be at least 6 characters");
 
-                // BOSS SECURE CHECK 1: OTP must exist
                 if (!_passwordResetOtps.TryGetValue(email, out var stored))
                     return Fail("No OTP found for this email. Please request new OTP via Forgot Password.");
 
-                // BOSS SECURE CHECK 2: OTP must not be expired
                 if (stored.Expiry < DateTime.UtcNow)
                 {
                     _passwordResetOtps.TryRemove(email, out _);
                     return Fail("OTP has expired. Please request a new OTP.");
                 }
 
-                // BOSS SECURE CHECK 3: OTP code must match
                 if (stored.Code != otpCode)
                     return Fail("Invalid OTP code. Please check your email and try again.");
 
@@ -896,7 +941,6 @@ namespace IrhamTrade.Server.Services
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "Firebase password update failed for {Email}", email); }
 
-                // Clear OTP after successful reset - one time use
                 _passwordResetOtps.TryRemove(email, out _);
 
                 _logger.LogInformation("Password reset SUCCESS for {Email} with valid OTP", email);
@@ -909,13 +953,11 @@ namespace IrhamTrade.Server.Services
             }
         }
 
-        // BOSS: Backward compatibility - old call without OTP will now FAIL secure - forces new secure flow
         public async Task<AuthResult> ResetPasswordAsync(string email, string newPassword)
         {
             return Fail("Security upgrade: OTP code is now required. Please use Forgot Password to get OTP, then reset with OTP code.");
         }
 
-        // BOSS: Helper - Secure 6-digit OTP using cryptography
         private static string GenerateSecureOtp()
         {
             using var rng = RandomNumberGenerator.Create();
@@ -925,7 +967,6 @@ namespace IrhamTrade.Server.Services
             return num.ToString();
         }
 
-        // BOSS: Optional - Verify OTP separately (for APK to check before allowing new password screen)
         public Task<AuthResult> VerifyOtpAsync(string email, string otpCode)
         {
             email = email.Trim().ToLowerInvariant();

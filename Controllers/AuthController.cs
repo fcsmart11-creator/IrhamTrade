@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace IrhamTrade.Server.Controllers
 {
-    // Purpose: Auth Controller - Professional Facebook standard - Returns real FirebaseUid + real name always, never fake ID "1", includes user-by-email for app fallback + dev-clear-all for fresh testing
+    // Purpose: Auth Controller - Professional Facebook standard - Returns real FirebaseUid + real name always, never fake ID "1", includes user-by-email for app fallback + dev-clear-all + SECURE OTP forgot password
     [ApiController]
     [Route("api/[controller]")]
     public class AuthController : ControllerBase
@@ -79,7 +79,7 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        // Purpose: DEV ONLY - Clear all data for fresh testing - Clears SQLite + Firestore users + blacklisted tokens, use when you clear Firebase console
+        // Purpose: DEV ONLY - Clear all data for fresh testing - Clears SQLite + Firestore users + blacklisted tokens
         [HttpDelete("dev-clear-all")]
         public async Task<IActionResult> DevClearAll([FromQuery] string confirm, [FromQuery] string email = "")
         {
@@ -96,7 +96,6 @@ namespace IrhamTrade.Server.Controllers
                 _context.Users.RemoveRange(users);
                 await _context.SaveChangesAsync();
 
-                // Auto-clear Firebase Auth too - Professional
                 int deletedFb = 0;
                 try
                 {
@@ -339,6 +338,7 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
+        // BOSS FIX: 100% SECURE - NOW REQUIRES OTP - Email + OtpCode + NewPassword
         [HttpPost("reset-password")]
         public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest req)
         {
@@ -346,10 +346,16 @@ namespace IrhamTrade.Server.Controllers
             {
                 if (req == null || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.NewPassword))
                     return BadRequest(new { success = false, message = "Email and new password required" });
+                if (string.IsNullOrWhiteSpace(req.OtpCode))
+                    return BadRequest(new { success = false, message = "OTP code required. Check your email inbox." });
                 if (req.NewPassword.Length < 6)
                     return BadRequest(new { success = false, message = "Password must be at least 6 characters" });
+                if (req.OtpCode.Length != 6)
+                    return BadRequest(new { success = false, message = "OTP must be 6 digits" });
 
-                var result = await _authService.ResetPasswordAsync(req.Email, req.NewPassword);
+                _logger.LogInformation("ResetPassword attempt with OTP: {Email}", req.Email);
+                var result = await _authService.ResetPasswordAsync(req.Email, req.OtpCode, req.NewPassword);
+
                 if (!result.Success)
                     return BadRequest(new { success = false, message = result.Message });
 
@@ -359,6 +365,28 @@ namespace IrhamTrade.Server.Controllers
             {
                 _logger.LogError(ex, "ResetPassword error");
                 return StatusCode(500, new { success = false, message = "Unable to reset password. Try again." });
+            }
+        }
+
+        // BOSS NEW: Verify OTP separately - APK can verify before showing new password field - Professional
+        [HttpPost("verify-otp")]
+        public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpRequest req)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.OtpCode))
+                    return BadRequest(new { success = false, message = "Email and OTP required" });
+
+                var result = await _authService.VerifyOtpAsync(req.Email, req.OtpCode);
+                if (!result.Success)
+                    return BadRequest(new { success = false, message = result.Message });
+
+                return Ok(new { success = true, message = result.Message });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "VerifyOtp error");
+                return StatusCode(500, new { success = false, message = "Unable to verify OTP. Try again." });
             }
         }
 
@@ -399,5 +427,7 @@ namespace IrhamTrade.Server.Controllers
     public class RegisterBuyerRequest { public string FullName { get; set; } = ""; public string Phone { get; set; } = ""; public string Location { get; set; } = ""; public string Email { get; set; } = ""; public string Password { get; set; } = ""; }
     public class LoginRequest { public string Email { get; set; } = ""; public string Password { get; set; } = ""; }
     public class ForgotPasswordRequest { public string Email { get; set; } = ""; }
-    public class ResetPasswordRequest { public string Email { get; set; } = ""; public string NewPassword { get; set; } = ""; }
+    // BOSS FIX: NOW 100% SECURE - Requires OTP - Email + OtpCode + NewPassword
+    public class ResetPasswordRequest { public string Email { get; set; } = ""; public string OtpCode { get; set; } = ""; public string NewPassword { get; set; } = ""; }
+    public class VerifyOtpRequest { public string Email { get; set; } = ""; public string OtpCode { get; set; } = ""; }
 }

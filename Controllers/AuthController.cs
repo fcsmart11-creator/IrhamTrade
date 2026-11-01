@@ -6,8 +6,10 @@ using Microsoft.EntityFrameworkCore;
 namespace IrhamTrade.Server.Controllers
 {
     // Purpose: Auth Controller - Professional Facebook standard - Returns real FirebaseUid + real name always, never fake ID "1", includes user-by-email for app fallback + dev-clear-all + SECURE OTP forgot password
+    // BOSS FINAL: Firestore Permanent Check + SQLite Temporary OTP + irhamtradesupport@gmail.com via Resend onboarding@resend.dev
     [ApiController]
     [Route("api/[controller]")]
+    [Route("api/auth")]
     public class AuthController : ControllerBase
     {
         private readonly AuthService _authService;
@@ -27,7 +29,7 @@ namespace IrhamTrade.Server.Controllers
         [HttpGet]
         public IActionResult Status()
         {
-            return Ok(new { message = "IrhamTrade Auth service running", project = "irhamtrade-31ca6", ready = true, time = DateTime.UtcNow });
+            return Ok(new { message = "IrhamTrade Auth service running", project = "irhamtrade-31ca6", ready = true, time = DateTime.UtcNow, auth = "Firestore permanent + SQLite temporary + irhamtradesupport@gmail.com" });
         }
 
         // Purpose: Get user by email - CRITICAL for app fallback when real ID missing, returns real ID + real name, blocks fake ID "1"
@@ -315,15 +317,19 @@ namespace IrhamTrade.Server.Controllers
             }
         }
 
-        [HttpPost("forgot-password")]
-        public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest req)
+        // ===== BOSS FINAL - UNIFIED ROUTES - Firestore Permanent + SQLite Temporary + irhamtradesupport@gmail.com =====
+        // NEW ROUTE: APK FirestoreService calls /api/auth/send-otp
+        [HttpPost("send-otp")]
+        [HttpPost("/api/auth/send-otp")]
+        [HttpPost("/api/Auth/send-otp")]
+        public async Task<IActionResult> SendOtp([FromBody] ForgotPasswordRequest req)
         {
             try
             {
                 if (req == null || string.IsNullOrWhiteSpace(req.Email) || !req.Email.Contains("@"))
                     return BadRequest(new { success = false, message = "Please enter a valid email address" });
 
-                _logger.LogInformation("ForgotPassword attempt: {Email}", req.Email);
+                _logger.LogInformation("SendOtp attempt: {Email} - Firestore permanent check", req.Email);
                 var result = await _authService.ForgotPasswordAsync(req.Email);
 
                 if (!result.Success)
@@ -333,28 +339,36 @@ namespace IrhamTrade.Server.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "ForgotPassword error");
+                _logger.LogError(ex, "SendOtp error");
                 return StatusCode(500, new { success = false, message = "Unable to process request. Try again." });
             }
         }
 
-        // BOSS FIX: 100% SECURE - NOW REQUIRES OTP - Email + OtpCode + NewPassword
-        [HttpPost("reset-password")]
-        public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest req)
+        [HttpPost("forgot-password")]
+        public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest req)
+        {
+            return await SendOtp(req);
+        }
+
+        // NEW ROUTE: APK calls /api/auth/reset-with-otp
+        [HttpPost("reset-with-otp")]
+        [HttpPost("/api/auth/reset-with-otp")]
+        [HttpPost("/api/Auth/reset-with-otp")]
+        public async Task<IActionResult> ResetWithOtp([FromBody] ResetPasswordRequest req)
         {
             try
             {
                 if (req == null || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.NewPassword))
                     return BadRequest(new { success = false, message = "Email and new password required" });
-                if (string.IsNullOrWhiteSpace(req.OtpCode))
-                    return BadRequest(new { success = false, message = "OTP code required. Check your email inbox." });
+                if (string.IsNullOrWhiteSpace(req.OtpCode) && string.IsNullOrWhiteSpace(req.Otp))
+                    return BadRequest(new { success = false, message = "OTP code required. Check your email inbox from irhamtradesupport@gmail.com" });
                 if (req.NewPassword.Length < 6)
                     return BadRequest(new { success = false, message = "Password must be at least 6 characters" });
-                if (req.OtpCode.Length != 6)
-                    return BadRequest(new { success = false, message = "OTP must be 6 digits" });
 
-                _logger.LogInformation("ResetPassword attempt with OTP: {Email}", req.Email);
-                var result = await _authService.ResetPasswordAsync(req.Email, req.OtpCode, req.NewPassword);
+                var otp = !string.IsNullOrWhiteSpace(req.OtpCode) ? req.OtpCode : req.Otp;
+
+                _logger.LogInformation("ResetWithOtp attempt: {Email} with OTP", req.Email);
+                var result = await _authService.ResetPasswordAsync(req.Email, otp, req.NewPassword);
 
                 if (!result.Success)
                     return BadRequest(new { success = false, message = result.Message });
@@ -363,21 +377,33 @@ namespace IrhamTrade.Server.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "ResetPassword error");
+                _logger.LogError(ex, "ResetWithOtp error");
                 return StatusCode(500, new { success = false, message = "Unable to reset password. Try again." });
             }
         }
 
+        // BOSS FIX: 100% SECURE - NOW REQUIRES OTP - Email + OtpCode + NewPassword - Legacy route
+        [HttpPost("reset-password")]
+        public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest req)
+        {
+            return await ResetWithOtp(req);
+        }
+
         // BOSS NEW: Verify OTP separately - APK can verify before showing new password field - Professional
+        // Unified route: /api/auth/verify-otp and /api/Auth/verify-otp both work
         [HttpPost("verify-otp")]
+        [HttpPost("/api/auth/verify-otp")]
+        [HttpPost("/api/Auth/verify-otp")]
         public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpRequest req)
         {
             try
             {
-                if (req == null || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.OtpCode))
+                var email = req?.Email ?? "";
+                var otp = req?.OtpCode ?? req?.Otp ?? "";
+                if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(otp))
                     return BadRequest(new { success = false, message = "Email and OTP required" });
 
-                var result = await _authService.VerifyOtpAsync(req.Email, req.OtpCode);
+                var result = await _authService.VerifyOtpAsync(email, otp);
                 if (!result.Success)
                     return BadRequest(new { success = false, message = result.Message });
 
@@ -427,7 +453,13 @@ namespace IrhamTrade.Server.Controllers
     public class RegisterBuyerRequest { public string FullName { get; set; } = ""; public string Phone { get; set; } = ""; public string Location { get; set; } = ""; public string Email { get; set; } = ""; public string Password { get; set; } = ""; }
     public class LoginRequest { public string Email { get; set; } = ""; public string Password { get; set; } = ""; }
     public class ForgotPasswordRequest { public string Email { get; set; } = ""; }
-    // BOSS FIX: NOW 100% SECURE - Requires OTP - Email + OtpCode + NewPassword
-    public class ResetPasswordRequest { public string Email { get; set; } = ""; public string OtpCode { get; set; } = ""; public string NewPassword { get; set; } = ""; }
-    public class VerifyOtpRequest { public string Email { get; set; } = ""; public string OtpCode { get; set; } = ""; }
+    // BOSS FINAL: NOW 100% SECURE - Requires OTP - Email + OtpCode + NewPassword - Supports both Otp and OtpCode field names
+    public class ResetPasswordRequest
+    {
+        public string Email { get; set; } = "";
+        public string OtpCode { get; set; } = "";
+        public string Otp { get; set; } = "";
+        public string NewPassword { get; set; } = "";
+    }
+    public class VerifyOtpRequest { public string Email { get; set; } = ""; public string OtpCode { get; set; } = ""; public string Otp { get; set; } = ""; }
 }

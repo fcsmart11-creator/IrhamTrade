@@ -6,9 +6,8 @@ using Microsoft.EntityFrameworkCore;
 namespace IrhamTrade.Server.Controllers
 {
     // Purpose: Auth Controller - Professional Facebook standard - Returns real FirebaseUid + real name always, never fake ID "1", includes user-by-email for app fallback + dev-clear-all + SECURE OTP forgot password
-    // BOSS FINAL: Firestore Permanent Check + SQLite Temporary OTP + irhamtradesupport@gmail.com via Resend onboarding@resend.dev
+    // BOSS FINAL FIX: Removed duplicate [Route("api/[controller]")] - Only ONE route [Route("api/auth")] - No more AmbiguousMatchException - Account creation fixed
     [ApiController]
-    [Route("api/[controller]")]
     [Route("api/auth")]
     public class AuthController : ControllerBase
     {
@@ -318,10 +317,8 @@ namespace IrhamTrade.Server.Controllers
         }
 
         // ===== BOSS FINAL - UNIFIED ROUTES - Firestore Permanent + SQLite Temporary + irhamtradesupport@gmail.com =====
-        // NEW ROUTE: APK FirestoreService calls /api/auth/send-otp
+        // FIXED: Only relative route - No more duplicate absolute routes
         [HttpPost("send-otp")]
-        [HttpPost("/api/auth/send-otp")]
-        [HttpPost("/api/Auth/send-otp")]
         public async Task<IActionResult> SendOtp([FromBody] ForgotPasswordRequest req)
         {
             try
@@ -350,10 +347,8 @@ namespace IrhamTrade.Server.Controllers
             return await SendOtp(req);
         }
 
-        // NEW ROUTE: APK calls /api/auth/reset-with-otp
+        // FIXED: Only relative route
         [HttpPost("reset-with-otp")]
-        [HttpPost("/api/auth/reset-with-otp")]
-        [HttpPost("/api/Auth/reset-with-otp")]
         public async Task<IActionResult> ResetWithOtp([FromBody] ResetPasswordRequest req)
         {
             try
@@ -389,11 +384,8 @@ namespace IrhamTrade.Server.Controllers
             return await ResetWithOtp(req);
         }
 
-        // BOSS NEW: Verify OTP separately - APK can verify before showing new password field - Professional
-        // Unified route: /api/auth/verify-otp and /api/Auth/verify-otp both work
+        // FIXED: Only relative route
         [HttpPost("verify-otp")]
-        [HttpPost("/api/auth/verify-otp")]
-        [HttpPost("/api/Auth/verify-otp")]
         public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpRequest req)
         {
             try
@@ -453,7 +445,6 @@ namespace IrhamTrade.Server.Controllers
     public class RegisterBuyerRequest { public string FullName { get; set; } = ""; public string Phone { get; set; } = ""; public string Location { get; set; } = ""; public string Email { get; set; } = ""; public string Password { get; set; } = ""; }
     public class LoginRequest { public string Email { get; set; } = ""; public string Password { get; set; } = ""; }
     public class ForgotPasswordRequest { public string Email { get; set; } = ""; }
-    // BOSS FINAL: NOW 100% SECURE - Requires OTP - Email + OtpCode + NewPassword - Supports both Otp and OtpCode field names
     public class ResetPasswordRequest
     {
         public string Email { get; set; } = "";

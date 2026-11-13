@@ -9,6 +9,8 @@ namespace IrhamTrade.Server.Services
     {
         private readonly FirestoreDb _db;
         private readonly ILogger<DashboardService> _logger;
+        public const int FreeLimit = 10;
+        public const int HistoryKeepDays = 90;
 
         public DashboardService(FirebaseService firebaseService, ILogger<DashboardService> logger)
         {
@@ -154,7 +156,7 @@ namespace IrhamTrade.Server.Services
 
             var productImage = GetString(source, "productImage");
             if (string.IsNullOrWhiteSpace(productImage)) productImage = GetString(source, "imageBase64");
-            if (string.IsNullOrWhiteSpace(productImage)) productImage = GetString(source, "location");
+            if (string.IsNullOrWhiteSpace(productImage)) productImage = GetString(source, "imageUrl");
 
             var nowValue = (object)now;
             var data = new Dictionary<string, object>(source)
@@ -293,11 +295,41 @@ namespace IrhamTrade.Server.Services
             }, new List<Dictionary<string, object>>(), $"GetBuyerHistoryByPhone {buyerPhone}");
         }
 
+        // Buyer feed: featured products first, then newest. Held/sold filtering stays with the app's existing rules.
         public async Task<List<Dictionary<string, object>>> GetAllDevicesAsync() =>
             await ExecuteWithRetryAsync(async () =>
             {
-                var snap = await _db.Collection("devices").Limit(200).GetSnapshotAsync();
-                return snap.Documents.Select(doc => SanitizeDoc(doc.ToDictionary(), doc.Id)).ToList();
+                var now = DateTime.UtcNow;
+                var byId = new Dictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
+
+                QuerySnapshot newest;
+                try { newest = await _db.Collection("devices").OrderByDescending("createdAt").Limit(200).GetSnapshotAsync(); }
+                catch { newest = await _db.Collection("devices").Limit(200).GetSnapshotAsync(); }
+                if (newest.Count == 0) newest = await _db.Collection("devices").Limit(200).GetSnapshotAsync();
+                foreach (var doc in newest.Documents) byId[doc.Id] = SanitizeDoc(doc.ToDictionary(), doc.Id);
+
+                // Featured products that are older than the newest 200 must still be shown
+                try
+                {
+                    var featured = await _db.Collection("devices")
+                        .WhereGreaterThan("featuredUntil", Timestamp.FromDateTime(now)).Limit(100).GetSnapshotAsync();
+                    foreach (var doc in featured.Documents) byId[doc.Id] = SanitizeDoc(doc.ToDictionary(), doc.Id);
+                }
+                catch (Exception ex) { _logger.LogWarning("Featured devices query skipped: {Msg}", ex.Message); }
+
+                var list = new List<Dictionary<string, object>>();
+                foreach (var d in byId.Values)
+                {
+                    // Skip bare leftover records that belong to no business
+                    if (string.IsNullOrWhiteSpace(GetString(d, "businessId")) && string.IsNullOrWhiteSpace(GetString(d, "ownerId"))) continue;
+                    d["isFeatured"] = d.TryGetValue("featuredUntil", out var fu) && fu is DateTime fdt && fdt > now;
+                    list.Add(d);
+                }
+
+                return list
+                    .OrderByDescending(d => d.TryGetValue("isFeatured", out var f) && f is bool fb && fb)
+                    .ThenByDescending(d => d.TryGetValue("createdAt", out var c) && c is DateTime cd ? cd : DateTime.MinValue)
+                    .ToList();
             }, new List<Dictionary<string, object>>(), "GetAllDevices");
 
         public async Task<List<Dictionary<string, object>>> GetDevicesByBusinessAsync(string businessId)
@@ -312,34 +344,138 @@ namespace IrhamTrade.Server.Services
             }, new List<Dictionary<string, object>>(), $"GetDevicesByBusiness {businessId}");
         }
 
+        // Counts the products a business occupies slots with. Held products count, sold ones do not.
+        private async Task<int> CountActiveDevicesAsync(string businessId)
+        {
+            var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+            if (snap.Count == 0)
+                snap = await _db.Collection("devices").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
+            return snap.Documents.Count(doc =>
+            {
+                try
+                {
+                    var d = doc.ToDictionary();
+                    if (d.TryGetValue("isSold", out var s) && s is bool sb && sb) return false;
+                    return !GetString(d, "status").Equals("sold", StringComparison.OrdinalIgnoreCase);
+                }
+                catch { return true; }
+            });
+        }
+
         public async Task<int> GetBusinessDeviceCountAsync(string businessId)
         {
             if (IsBadId(businessId)) return 0;
-            return await ExecuteWithRetryAsync(async () =>
+            return await ExecuteWithRetryAsync(async () => await CountActiveDevicesAsync(businessId), 0, $"GetCount {businessId}");
+        }
+
+        private static long ToLongSafe(object? v)
+        {
+            try
             {
-                var snap = await _db.Collection("devices").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
-                if (snap.Count == 0)
-                    snap = await _db.Collection("devices").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
-                return snap.Count;
-            }, 0, $"GetCount {businessId}");
+                if (v == null) return 0;
+                if (v is long l) return l;
+                if (v is int i) return i;
+                if (v is double d) return (long)d;
+                if (long.TryParse(v.ToString(), out var p)) return p;
+            }
+            catch { }
+            return 0;
+        }
+
+        private static DateTime? ToDateSafe(object? v)
+        {
+            try
+            {
+                if (v is Timestamp t) return t.ToDateTime();
+                if (v is DateTime dt) return dt.ToUniversalTime();
+                if (v != null && DateTime.TryParse(v.ToString(), System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed))
+                    return parsed;
+            }
+            catch { }
+            return null;
+        }
+
+        private sealed class PlanState
+        {
+            public long Limit { get; set; } = FreeLimit;
+            public int Count { get; set; }
+            public bool HasUpgrade { get; set; }
+            public DateTime? LimitExpiresAt { get; set; }
+            public DateTime? FeaturedUntil { get; set; }
+            public bool CanPublish => Count < Limit;
+            public bool IsFeatured => FeaturedUntil.HasValue && FeaturedUntil.Value > DateTime.UtcNow;
+        }
+
+        // Reads the business's plan: free (10) unless an upgrade is stored and has not expired
+        private async Task<PlanState?> LoadPlanStateAsync(string businessId)
+        {
+            if (IsBadId(businessId)) return null;
+            return await ExecuteWithRetryAsync<PlanState?>(async () =>
+            {
+                var now = DateTime.UtcNow;
+                var state = new PlanState();
+                var snap = await _db.Collection("users").Document(businessId).GetSnapshotAsync();
+                if (snap.Exists)
+                {
+                    var d = snap.ToDictionary();
+                    var upgraded = ToLongSafe(d.TryGetValue("publishLimit", out var pl) ? pl : null);
+                    state.LimitExpiresAt = ToDateSafe(d.TryGetValue("limitExpiresAt", out var le) ? le : null);
+                    state.FeaturedUntil = ToDateSafe(d.TryGetValue("featuredUntil", out var fu) ? fu : null);
+                    if (upgraded > FreeLimit && (!state.LimitExpiresAt.HasValue || state.LimitExpiresAt.Value > now))
+                    {
+                        state.Limit = upgraded;
+                        state.HasUpgrade = true;
+                    }
+                }
+                state.Count = await CountActiveDevicesAsync(businessId);
+                return state;
+            }, null, $"LoadPlan {businessId}");
+        }
+
+        // Plan summary for the app and the admin panel
+        public async Task<Dictionary<string, object>?> GetBusinessPlanAsync(string businessId)
+        {
+            var s = await LoadPlanStateAsync(businessId);
+            if (s == null) return null;
+            return new Dictionary<string, object>
+            {
+                ["businessId"] = businessId,
+                ["freeLimit"] = FreeLimit,
+                ["limit"] = s.Limit,
+                ["count"] = s.Count,
+                ["remaining"] = Math.Max(0, s.Limit - s.Count),
+                ["canPublish"] = s.CanPublish,
+                ["hasUpgrade"] = s.HasUpgrade,
+                ["limitExpiresAt"] = s.HasUpgrade && s.LimitExpiresAt.HasValue ? s.LimitExpiresAt.Value.ToString("o") : "",
+                ["isFeatured"] = s.IsFeatured,
+                ["featuredUntil"] = s.IsFeatured ? s.FeaturedUntil!.Value.ToString("o") : ""
+            };
         }
 
         public async Task<string> CreateDeviceAsync(Dictionary<string, object> data)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
+
+            // These checks run OUTSIDE the retry wrapper on purpose: the wrapper swallows exceptions,
+            // so a real "limit reached" answer would never reach the app.
+            var businessId = GetString(data, "businessId");
+            if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "ownerId");
+            if (IsBadId(businessId)) throw new ArgumentException($"Invalid businessId: {businessId}");
+
+            var name = GetString(data, "name");
+            if (string.IsNullOrWhiteSpace(name)) name = GetString(data, "productName");
+            if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Device name is required");
+
+            var plan = await LoadPlanStateAsync(businessId);
+            if (plan != null && !plan.CanPublish)
+                throw new InvalidOperationException($"Publish limit reached: {plan.Limit} items. Upgrade your plan to publish more.");
+
+            // Created once, so a retry overwrites the same record instead of creating a duplicate product
+            var docId = Guid.NewGuid().ToString("N");
+
             return await ExecuteWithRetryAsync(async () =>
             {
-                var businessId = GetString(data, "businessId");
-                if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "ownerId");
-                if (IsBadId(businessId)) throw new ArgumentException($"Invalid businessId: {businessId}");
-
-                var name = GetString(data, "name");
-                if (string.IsNullOrWhiteSpace(name)) name = GetString(data, "productName");
-                if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Device name is required");
-
-                var count = await GetBusinessDeviceCountAsync(businessId);
-                if (count >= 20) throw new InvalidOperationException("Free limit reached: 20 items max.");
-
                 var brand = GetString(data, "brand");
                 var price = GetString(data, "price");
                 if (string.IsNullOrWhiteSpace(price)) price = GetString(data, "productPrice");
@@ -354,7 +490,6 @@ namespace IrhamTrade.Server.Services
                 var category = GetString(data, "category");
                 if (string.IsNullOrWhiteSpace(category)) category = "General";
 
-                var docId = Guid.NewGuid().ToString("N");
                 var now = Timestamp.GetCurrentTimestamp();
                 var firestoreData = new Dictionary<string, object>
                 {
@@ -382,6 +517,9 @@ namespace IrhamTrade.Server.Services
                     ["createdAt"] = now,
                     ["updatedAt"] = now
                 };
+                // A business that is currently featured gets its new products featured too
+                if (plan != null && plan.IsFeatured)
+                    firestoreData["featuredUntil"] = Timestamp.FromDateTime(DateTime.SpecifyKind(plan.FeaturedUntil!.Value, DateTimeKind.Utc));
                 await _db.Collection("devices").Document(docId).SetAsync(firestoreData);
                 return docId;
             }, null!, "CreateDevice");
@@ -476,6 +614,25 @@ namespace IrhamTrade.Server.Services
                 await _db.Collection("interests").Document(doc.Id)
                     .SetAsync(new Dictionary<string, object> { ["id"] = doc.Id, ["interestId"] = doc.Id }, SetOptions.MergeAll);
 
+                // HOLD the product: from now on no other buyer sees it. Decline releases it, Accept sells it.
+                // UpdateAsync (not Set) so a deleted product can never be re-created as an empty record.
+                if (!string.IsNullOrWhiteSpace(productId))
+                {
+                    try
+                    {
+                        await _db.Collection("devices").Document(productId).UpdateAsync(new Dictionary<string, object>
+                        {
+                            ["status"] = "reserved",
+                            ["isAvailable"] = false,
+                            ["isReserved"] = true,
+                            ["reservedAt"] = now,
+                            ["reservedFor"] = doc.Id,
+                            ["updatedAt"] = now
+                        });
+                    }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Interest {Id} saved but product {ProductId} could not be held", doc.Id, productId); }
+                }
+
                 _ = SendPushToUserAsync(businessId, "new_order",
                     $"New order from {(string.IsNullOrWhiteSpace(buyerName) ? "a buyer" : buyerName)}",
                     $"{(string.IsNullOrWhiteSpace(productName) ? "A product" : productName)} - GHS {price}\n{buyerPhone} - {buyerLocation}",
@@ -528,7 +685,6 @@ namespace IrhamTrade.Server.Services
             }, new List<Dictionary<string, object>>(), $"GetBusinessInterests {businessId}");
         }
 
-        // BOSS - RESTORED ORIGINAL AUTHENTIC SIGNATURE - Fixes CS1501 - Interest logic untouched!
         public async Task<bool> UpdateInterestStatusAsync(
             string interestId, string status, string? businessName = null, string? businessResponse = null)
         {
@@ -934,6 +1090,20 @@ namespace IrhamTrade.Server.Services
             catch (Exception ex) { _logger.LogWarning(ex, "Push failed for {UserId}", userId); }
         }
 
+        private static DateTime? DateOfRecord(Dictionary<string, object> x)
+        {
+            foreach (var key in new[] { "updatedAt", "createdAt" })
+            {
+                if (x.TryGetValue(key, out var v))
+                {
+                    var d = ToDateSafe(v);
+                    if (d.HasValue) return d;
+                }
+            }
+            return null;
+        }
+
+        // Past decisions (accepted + declined) for the business Orders page: last 90 days, minus anything the business hid
         public async Task<List<Dictionary<string, object>>> GetBusinessOrderHistoryAsync(string businessId)
         {
             if (IsBadId(businessId)) return new List<Dictionary<string, object>>();
@@ -945,8 +1115,11 @@ namespace IrhamTrade.Server.Services
                 var snap2 = await _db.Collection("buyer_history").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
                 foreach (var doc in snap2.Documents) all[doc.Id] = SanitizeInterest(doc.ToDictionary(), doc.Id);
 
+                var cutoff = DateTime.UtcNow.AddDays(-HistoryKeepDays);
                 var list = all.Values
                     .Where(x => NormalizeStatus(GetString(x, "status")) != "Pending")
+                    .Where(x => !(x.TryGetValue("businessHidden", out var h) && h is bool hb && hb))
+                    .Where(x => (DateOfRecord(x) ?? DateTime.UtcNow) >= cutoff)
                     .OrderByDescending(x => x.TryGetValue("createdAt", out var c) && c is DateTime dt ? dt : DateTime.MinValue)
                     .Take(100)
                     .ToList();
@@ -962,6 +1135,55 @@ namespace IrhamTrade.Server.Services
                 }
                 return list;
             }, new List<Dictionary<string, object>>(), $"GetBusinessOrderHistory {businessId}");
+        }
+
+        // The business deletes finished orders from its own Orders page. Only a flag is set, so the buyer's History is untouched.
+        public async Task<int> HideBusinessOrderHistoryAsync(string businessId, List<string> ids, bool all)
+        {
+            if (IsBadId(businessId)) return 0;
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var targets = new Dictionary<string, DocumentReference>(StringComparer.Ordinal);
+                if (all)
+                {
+                    var s1 = await _db.Collection("buyer_history").WhereEqualTo("businessId", businessId).GetSnapshotAsync();
+                    foreach (var doc in s1.Documents)
+                        if (NormalizeStatus(GetString(doc.ToDictionary(), "status")) != "Pending") targets[doc.Id] = doc.Reference;
+                    var s2 = await _db.Collection("buyer_history").WhereEqualTo("ownerId", businessId).GetSnapshotAsync();
+                    foreach (var doc in s2.Documents)
+                        if (NormalizeStatus(GetString(doc.ToDictionary(), "status")) != "Pending") targets[doc.Id] = doc.Reference;
+                }
+                else
+                {
+                    foreach (var raw in (ids ?? new List<string>()).Take(200))
+                    {
+                        var id = (raw ?? "").Trim();
+                        if (string.IsNullOrWhiteSpace(id) || targets.ContainsKey(id)) continue;
+                        var one = await _db.Collection("buyer_history").Document(id).GetSnapshotAsync();
+                        if (!one.Exists) continue;
+                        var d = one.ToDictionary();
+                        var owner = GetString(d, "businessId");
+                        if (string.IsNullOrWhiteSpace(owner)) owner = GetString(d, "ownerId");
+                        if (!string.Equals(owner, businessId, StringComparison.Ordinal)) continue;
+                        if (NormalizeStatus(GetString(d, "status")) == "Pending") continue;
+                        targets[id] = one.Reference;
+                    }
+                }
+
+                var refs = targets.Values.ToList();
+                for (int i = 0; i < refs.Count; i += 400)
+                {
+                    var batch = _db.StartBatch();
+                    foreach (var r in refs.Skip(i).Take(400))
+                        batch.Set(r, new Dictionary<string, object>
+                        {
+                            ["businessHidden"] = true,
+                            ["businessHiddenAt"] = Timestamp.GetCurrentTimestamp()
+                        }, SetOptions.MergeAll);
+                    await batch.CommitAsync();
+                }
+                return refs.Count;
+            }, 0, $"HideOrderHistory {businessId}");
         }
 
         public async Task<bool> UpdateBuyerBasicProfileAsync(string buyerId, string fullName, string phone, string location)
@@ -981,7 +1203,6 @@ namespace IrhamTrade.Server.Services
             }, false, $"UpdateBuyerBasic {buyerId}");
         }
 
-        // BOSS FIX 100% - RESEND API - Fixes 403 gmail.com domain not verified + Render SMTP timeout - Uses onboarding@resend.dev
         private async Task<bool> SendAdminEmailAsync(string subject, string text)
         {
             var fromEmail = Environment.GetEnvironmentVariable("SMTP_EMAIL")?.Trim();
@@ -1000,7 +1221,6 @@ namespace IrhamTrade.Server.Services
                     httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {resendApiKey}");
                     var safeHtml = System.Net.WebUtility.HtmlEncode(text).Replace("\n", "<br/>");
                     var htmlBody = $"<div style='font-family:Arial,sans-serif; max-width:700px;'><h2>{System.Net.WebUtility.HtmlEncode(subject)}</h2><p>{safeHtml}</p><hr/><p style='font-size:12px;color:#888;'>IRHAM TRADE - {fromEmail}</p></div>";
-                    // BOSS FIX: Use onboarding@resend.dev - Resend allows this without domain verification - Fixes 403 Forbidden
                     var payload = new
                     {
                         from = "IrhamTrade <onboarding@resend.dev>",
@@ -1021,7 +1241,6 @@ namespace IrhamTrade.Server.Services
                     else
                     {
                         _logger.LogError("❌ Resend FAILED for report {Sub}: {Status} {Body}", subject, response.StatusCode, respBody);
-                        // Don't try Gmail SMTP on Render - It always times out on port 587 - Return false so user knows
                         return false;
                     }
                 }

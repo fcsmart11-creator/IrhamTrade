@@ -1,9 +1,5 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using IrhamTrade.Server.Services;
-using Google.Cloud.Firestore;
-using System.Net;
-using System.Net.Mail;
-using System.Text;
 
 namespace IrhamTrade.Server.Controllers
 {
@@ -17,10 +13,19 @@ namespace IrhamTrade.Server.Controllers
 
         private static bool IsBadId(string? id) => string.IsNullOrWhiteSpace(id) || id == "1" || id == "2" || id.Length < 10;
 
+        // With ?businessId=... it returns only that business's products (the business Home counts use this). Without it, the buyer feed.
         [HttpGet]
-        public async Task<IActionResult> GetAll()
+        public async Task<IActionResult> GetAll([FromQuery] string? businessId = null)
         {
-            try { return Ok(await _svc.GetAllDevicesAsync()); }
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(businessId))
+                {
+                    if (IsBadId(businessId)) return Ok(new List<Dictionary<string, object>>());
+                    return Ok(await _svc.GetDevicesByBusinessAsync(businessId));
+                }
+                return Ok(await _svc.GetAllDevicesAsync());
+            }
             catch (Exception ex) { _logger.LogError(ex, "GetAll Devices failed"); return Ok(new List<Dictionary<string, object>>()); }
         }
 
@@ -36,13 +41,16 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex) { _logger.LogError(ex, "GetByBusiness failed {BusinessId}", businessId); return Ok(new List<Dictionary<string, object>>()); }
         }
 
+        // Real plan numbers: count, limit (10 free or the upgraded limit), canPublish, remaining, expiry dates
         [HttpGet("count/{businessId}")]
         public async Task<IActionResult> GetCount(string businessId)
         {
             if (IsBadId(businessId))
-                return Ok(new { businessId, count = 0, limit = 20, canPublish = true });
-            var count = await _svc.GetBusinessDeviceCountAsync(businessId);
-            return Ok(new { businessId, count, limit = 20, canPublish = count < 20 });
+                return Ok(new { businessId, count = 0, limit = DashboardService.FreeLimit, canPublish = true });
+            var plan = await _svc.GetBusinessPlanAsync(businessId);
+            if (plan == null)
+                return Ok(new { businessId, count = 0, limit = DashboardService.FreeLimit, canPublish = true });
+            return Ok(plan);
         }
 
         [HttpPost]
@@ -245,6 +253,37 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex) { _logger.LogError(ex, "GetByBusiness failed {BusinessId}", businessId); return Ok(new List<Dictionary<string, object>>()); }
         }
 
+        // Past decisions (accepted + declined, last 90 days) for the business Orders page
+        [HttpGet("business/{businessId}/history")]
+        public async Task<IActionResult> GetBusinessHistory(string businessId)
+        {
+            if (IsBadId(businessId)) return Ok(new List<Dictionary<string, object>>());
+            try { return Ok(await _svc.GetBusinessOrderHistoryAsync(businessId)); }
+            catch (Exception ex) { _logger.LogError(ex, "GetBusinessHistory failed {BusinessId}", businessId); return Ok(new List<Dictionary<string, object>>()); }
+        }
+
+        // The business deletes finished orders from its own Orders page (the buyer's History is not touched)
+        [HttpPost("business/{businessId}/hide")]
+        public async Task<IActionResult> HideBusinessOrders(string businessId, [FromBody] Dictionary<string, object> body)
+        {
+            try
+            {
+                if (IsBadId(businessId)) return BadRequest(new { success = false, message = "Invalid business" });
+                var ids = new List<string>();
+                var all = false;
+                if (body != null)
+                {
+                    if (body.TryGetValue("all", out var rawAll) && rawAll is System.Text.Json.JsonElement ja && ja.ValueKind == System.Text.Json.JsonValueKind.True) all = true;
+                    if (body.TryGetValue("ids", out var rawIds) && rawIds is System.Text.Json.JsonElement ji && ji.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        foreach (var el in ji.EnumerateArray())
+                            if (el.ValueKind == System.Text.Json.JsonValueKind.String) ids.Add(el.GetString() ?? "");
+                }
+                var count = await _svc.HideBusinessOrderHistoryAsync(businessId, ids, all);
+                return Ok(new { success = true, hidden = count });
+            }
+            catch (Exception ex) { _logger.LogError(ex, "HideBusinessOrders failed {BusinessId}", businessId); return StatusCode(500, new { success = false, message = "Could not delete right now" }); }
+        }
+
         [HttpDelete("{interestId}")]
         public async Task<IActionResult> Delete(string interestId)
         {
@@ -392,378 +431,6 @@ namespace IrhamTrade.Server.Controllers
             {
                 _logger.LogError(ex, "Create buyer history failed");
                 return Ok(new { success = true, message = "Saved (fallback)" });
-            }
-        }
-    }
-
-    [ApiController]
-    [Route("api/[controller]")]
-    public class SupportController : ControllerBase
-    {
-        private readonly DashboardService _svc;
-        private readonly FirebaseService _firebase;
-        private readonly ILogger<SupportController> _logger;
-
-        public SupportController(DashboardService svc, FirebaseService firebase, ILogger<SupportController> logger)
-        {
-            _svc = svc;
-            _firebase = firebase;
-            _logger = logger;
-        }
-
-        private static string GetString(Dictionary<string, object> data, string key)
-        {
-            try
-            {
-                if (data.TryGetValue(key, out var v) && v != null)
-                {
-                    if (v is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.String)
-                        return je.GetString()?.Trim() ?? "";
-                    return v.ToString()?.Trim() ?? "";
-                }
-                foreach (var kv in data)
-                    if (kv.Key.Equals(key, StringComparison.OrdinalIgnoreCase) && kv.Value != null)
-                        return kv.Value.ToString()?.Trim() ?? "";
-            }
-            catch { }
-            return "";
-        }
-
-        private static string MaskBusinessId(string rawId)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(rawId)) return "IRH-****-XXXX";
-                rawId = rawId.Trim();
-                if (rawId.Length <= 4) return $"IRH-****-{rawId.ToUpper()}";
-                var last4 = rawId.Substring(rawId.Length - 4).ToUpper();
-                return $"IRH-****-{last4}";
-            }
-            catch { return "IRH-****-XXXX"; }
-        }
-
-        // BOSS FIX 100% - RESEND API - Fixes 403 gmail.com domain not verified + Render SMTP timeout - Uses onboarding@resend.dev
-        private async Task<bool> SendGmailEmailAsync(string subject, string body)
-        {
-            var toEmail = Environment.GetEnvironmentVariable("SMTP_TO_EMAIL")?.Trim();
-            var fromEmail = Environment.GetEnvironmentVariable("SMTP_EMAIL")?.Trim();
-            if (string.IsNullOrWhiteSpace(toEmail)) toEmail = "irhamtradesupport@gmail.com";
-            if (string.IsNullOrWhiteSpace(fromEmail)) fromEmail = "irhamtradesupport@gmail.com";
-
-            var resendApiKey = Environment.GetEnvironmentVariable("RESEND_API_KEY")?.Trim()
-                ?? Environment.GetEnvironmentVariable("Resend__ApiKey")?.Trim();
-
-            if (!string.IsNullOrWhiteSpace(resendApiKey))
-            {
-                try
-                {
-                    using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-                    httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {resendApiKey}");
-                    var safeHtml = System.Net.WebUtility.HtmlEncode(body).Replace("\n", "<br/>");
-                    var htmlBody = $"<div style='font-family:Arial; max-width:700px;'><h2>{System.Net.WebUtility.HtmlEncode(subject)}</h2><p>{safeHtml}</p><hr/><p style='font-size:12px;color:#888;'>From: {fromEmail} via IrhamTrade</p></div>";
-                    // BOSS FIX: Use onboarding@resend.dev - Resend allows this without domain verification - Fixes 403 Forbidden
-                    var payload = new
-                    {
-                        from = "IrhamTrade <onboarding@resend.dev>",
-                        to = new[] { toEmail },
-                        subject = subject,
-                        html = htmlBody,
-                        text = body
-                    };
-                    var json = System.Text.Json.JsonSerializer.Serialize(payload);
-                    var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    var response = await httpClient.PostAsync("https://api.resend.com/emails", content);
-                    var respBody = await response.Content.ReadAsStringAsync();
-                    if (response.IsSuccessStatusCode)
-                    {
-                        _logger.LogInformation("✅ EMAIL SENT via RESEND to {To} - Subject: {Sub} - {Resp}", toEmail, subject, respBody);
-                        return true;
-                    }
-                    else
-                    {
-                        _logger.LogError("❌ Resend FAILED for {Sub}: {Status} {Body}", subject, response.StatusCode, respBody);
-                        return false;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "⚠️ Resend exception for {Sub}", subject);
-                    return false;
-                }
-            }
-
-            _logger.LogWarning("❌ RESEND_API_KEY missing - Report saved in DB but email not sent - Set RESEND_API_KEY on Render");
-            return false;
-        }
-
-        [HttpGet("notices")]
-        public async Task<IActionResult> GetNotices()
-        {
-            try { var notices = await _svc.GetSafetyNoticesAsync(); return Ok(notices); }
-            catch (Exception ex) { _logger.LogError(ex, "Support notices failed"); return Ok(new List<Dictionary<string, object>>()); }
-        }
-
-        [HttpPost("contact")]
-        public async Task<IActionResult> Contact([FromBody] Dictionary<string, object> data)
-        {
-            try
-            {
-                if (data == null) return BadRequest(new { success = false, message = "Message required" });
-                var message = GetString(data, "message");
-                if (string.IsNullOrWhiteSpace(message) || message.Length < 5)
-                    return BadRequest(new { success = false, message = "Message must be at least 5 characters" });
-
-                var buyerEmail = GetString(data, "buyerEmail");
-                var buyerName = GetString(data, "buyerName");
-                if (string.IsNullOrWhiteSpace(buyerName)) buyerName = GetString(data, "buyer_name");
-                var buyerId = GetString(data, "buyerId");
-                if (string.IsNullOrWhiteSpace(buyerId)) buyerId = GetString(data, "buyer_id");
-
-                var db = _firebase.FirestoreDb;
-                var docId = Guid.NewGuid().ToString("N");
-                var now = Timestamp.GetCurrentTimestamp();
-                await db.Collection("support_messages").Document(docId).SetAsync(new Dictionary<string, object>
-                {
-                    ["id"] = docId,
-                    ["buyerId"] = buyerId,
-                    ["buyerName"] = buyerName,
-                    ["buyerEmail"] = buyerEmail,
-                    ["message"] = message,
-                    ["type"] = "support",
-                    ["status"] = "new",
-                    ["createdAt"] = now
-                });
-
-                var subject = $"[IrhamTrade Support] Message from {buyerName} - {buyerEmail}";
-                var body = $"Support message\n\nFrom: {buyerName}\nEmail: {buyerEmail}\nBuyerId: {buyerId}\n\nMessage:\n{message}\n\nTime UTC: {DateTime.UtcNow:yyyy-MM-dd HH:mm}\nDocId: {docId}";
-                await SendGmailEmailAsync(subject, body);
-
-                return Ok(new { success = true, message = "Support message sent to irhamtradesupport@gmail.com" });
-            }
-            catch (Exception ex) { _logger.LogError(ex, "Contact failed"); return Ok(new { success = true, message = "Message saved - will be reviewed" }); }
-        }
-
-        [HttpPost("report-business")]
-        public async Task<IActionResult> ReportBusiness([FromBody] Dictionary<string, object> data)
-        {
-            try
-            {
-                if (data == null) return BadRequest(new { success = false, message = "Report data required" });
-
-                var businessName = GetString(data, "reportedBusinessName");
-                if (string.IsNullOrWhiteSpace(businessName)) businessName = GetString(data, "businessName");
-                if (string.IsNullOrWhiteSpace(businessName)) businessName = GetString(data, "reportedBusiness");
-
-                var businessId = GetString(data, "reportedBusinessId");
-                if (string.IsNullOrWhiteSpace(businessId)) businessId = GetString(data, "businessId");
-
-                var product = GetString(data, "reportedProduct");
-                if (string.IsNullOrWhiteSpace(product)) product = GetString(data, "productName");
-
-                var reason = GetString(data, "reason");
-                if (string.IsNullOrWhiteSpace(reason)) reason = GetString(data, "message");
-                if (string.IsNullOrWhiteSpace(reason)) reason = GetString(data, "details");
-
-                var buyerId = GetString(data, "buyerId");
-                if (string.IsNullOrWhiteSpace(buyerId)) buyerId = GetString(data, "reporterId");
-                var buyerName = GetString(data, "buyerName");
-                var buyerEmail = GetString(data, "buyerEmail");
-                var buyerPhone = GetString(data, "buyerPhone");
-                var businessCodeMasked = GetString(data, "businessCodeMasked");
-                if (string.IsNullOrWhiteSpace(businessCodeMasked)) businessCodeMasked = MaskBusinessId(businessId);
-                var buyerIdMasked = GetString(data, "buyerIdMasked");
-
-                if (string.IsNullOrWhiteSpace(businessName) || businessName.Length < 2)
-                    return BadRequest(new { success = false, message = "Business name required" });
-                if (string.IsNullOrWhiteSpace(reason) || reason.Length < 10)
-                    return BadRequest(new { success = false, message = "Reason must be at least 10 characters" });
-
-                var fullDetails = $"Product: {product}\nReason: {reason}\nReported via BuyerProfile Help\nBuyerEmail: {buyerEmail}\nBuyerName: {buyerName}\nMasked Code: {businessCodeMasked}";
-                var result = await _svc.SubmitSellerReportAsync(buyerId, businessId, businessName, product + " - " + reason, fullDetails);
-
-                try
-                {
-                    var db = _firebase.FirestoreDb;
-                    var docId = Guid.NewGuid().ToString("N");
-                    await db.Collection("fraud_reports").Document(docId).SetAsync(new Dictionary<string, object>
-                    {
-                        ["id"] = docId,
-                        ["reporterId"] = buyerId,
-                        ["reporterName"] = buyerName,
-                        ["reporterEmail"] = buyerEmail,
-                        ["reportedBusinessId"] = businessId,
-                        ["reportedBusinessName"] = businessName,
-                        ["reportedBusinessCodeMasked"] = businessCodeMasked,
-                        ["reportedProduct"] = product,
-                        ["reason"] = reason,
-                        ["type"] = "fraud_report",
-                        ["status"] = "new",
-                        ["createdAt"] = Timestamp.GetCurrentTimestamp()
-                    });
-                }
-                catch (Exception ex) { _logger.LogWarning(ex, "Save fraud_reports failed"); }
-
-                var subject = $"[REPORT] Fraud: {businessName} - {businessCodeMasked} - by {buyerName}";
-                var body = $"IRHAMTRADE - FRAUD BUSINESS REPORT\n\n" +
-                           $"Business Name: {businessName}\n" +
-                           $"Business Code (Masked - Professional): {businessCodeMasked}\n" +
-                           $"Business ID (for admin lookup - secure): {businessId}\n" +
-                           $"Product: {product}\n\n" +
-                           $"Reason:\n{reason}\n\n" +
-                           $"--- Buyer Info ---\n" +
-                           $"Name: {buyerName}\n" +
-                           $"Email: {buyerEmail}\n" +
-                           $"Phone: {buyerPhone}\n" +
-                           $"Buyer ID: {buyerId}\n" +
-                           $"Buyer Code Masked: {buyerIdMasked}\n\n" +
-                           $"Time UTC: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}\n" +
-                           $"App: IrhamTrade v1.0 Buyer\n" +
-                           $"Doc: fraud_reports\n\n" +
-                           $"Please review within 24h.";
-
-                await SendGmailEmailAsync(subject, body);
-
-                if (result.Ok)
-                    return Ok(new { success = true, message = "Report sent to irhamtradesupport@gmail.com inbox - will be reviewed within 24h" });
-                else
-                    return BadRequest(new { success = false, message = result.Message });
-            }
-            catch (Exception ex) { _logger.LogError(ex, "Report business failed"); return StatusCode(500, new { success = false, message = ex.Message }); }
-        }
-
-        [HttpGet("admin-panel")]
-        public IActionResult AdminPanel()
-        {
-            var html = @"
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset='utf-8'>
-<meta name='viewport' content='width=device-width, initial-scale=1'>
-<title>IrhamTrade Admin - Safety Notice</title>
-<style>
-body{font-family:Arial;background:#f5f5f5;margin:0;padding:20px}
-.card{background:white;padding:25px;border-radius:12px;max-width:600px;margin:30px auto;box-shadow:0 4px 20px rgba(0,0,0,0.12)}
-input,textarea,select{width:100%;padding:13px;margin:8px 0;border:1px solid #ddd;border-radius:8px;box-sizing:border-box;font-size:15px}
-button{background:#d32f2f;color:white;padding:15px;border:none;border-radius:8px;width:100%;font-weight:bold;cursor:pointer;font-size:16px;margin-top:10px}
-button:disabled{background:#999}
-.success{background:#4caf50;color:white;padding:12px;border-radius:8px;margin:12px 0;display:none;text-align:center}
-.error{background:#f44336;color:white;padding:12px;border-radius:8px;margin:12px 0;display:none;text-align:center}
-h2{color:#d32f2f;text-align:center;margin:0 0 5px 0}
-label{font-weight:bold;margin-top:12px;display:block;font-size:14px;color:#333}
-small{color:#888;display:block;text-align:center;margin-top:15px}
-a{color:#d32f2f;text-decoration:none}
-</style>
-</head>
-<body>
-<div class='card'>
-<h2>🔐 IrhamTrade Admin Panel</h2>
-<p style='text-align:center;color:#666;margin-top:0'>Publish safety announcements to all buyers</p>
-<div id='success' class='success'></div>
-<div id='error' class='error'></div>
-<label>Title * (min 3 chars)</label>
-<input id='title' placeholder='Example: Safety Alert - Beware of Scammers' maxlength='100'>
-<label>Type *</label>
-<select id='type'><option value='info'>Info - Blue</option><option value='warning'>Warning - Orange</option><option value='alert'>Alert - Red</option><option value='success'>Success - Green</option></select>
-<label>Message * (min 10 chars)</label>
-<textarea id='message' rows='6' placeholder='Dear customers, please be careful of sellers asking for advance payment...' maxlength='2000'></textarea>
-<button id='btn' onclick='publish()'>📢 Publish Announcement</button>
-<p style='text-align:center;margin-top:15px'><a href='/api/Support/notices' target='_blank'>View Live Notices (JSON)</a> | <a href='/api/dashboard/safety-notices' target='_blank'>API Safety Notices</a></p>
-<small>Server: irhamtrade.onrender.com | irhamtradesupport@gmail.com<br>All buyers will see this in Profile > Help > Safety Notices</small>
-</div>
-<script>
-async function publish(){
-  const title=document.getElementById('title').value.trim();
-  const message=document.getElementById('message').value.trim();
-  const type=document.getElementById('type').value;
-  const success=document.getElementById('success');
-  const error=document.getElementById('error');
-  const btn=document.getElementById('btn');
-  success.style.display='none'; error.style.display='none';
-  if(title.length<3){error.textContent='Title must be at least 3 characters'; error.style.display='block'; return;}
-  if(message.length<10){error.textContent='Message must be at least 10 characters'; error.style.display='block'; return;}
-  btn.disabled=true; btn.textContent='⏳ Publishing... Please wait 60s - Waking server...';
-  for(let i=0;i<3;i++){
-    try{
-      const controller=new AbortController();
-      const timeout=setTimeout(()=>controller.abort(),60000);
-      const res=await fetch('/api/Support/announce',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({title,message,type}),
-        signal:controller.signal
-      });
-      clearTimeout(timeout);
-      const data=await res.json();
-      if(res.ok && data.success){
-        success.textContent='✅ Published! Live for all users. ID: '+data.id;
-        success.style.display='block';
-        document.getElementById('title').value='';
-        document.getElementById('message').value='';
-        btn.disabled=false; btn.textContent='📢 Publish Announcement';
-        return;
-      }else{
-        throw new Error(data.message||'Failed to publish');
-      }
-    }catch(e){
-      if(i===2){
-        error.textContent='❌ Failed: '+e.message+'. Server may be sleeping. Wait 1 minute and try again.';
-        error.style.display='block';
-        btn.disabled=false; btn.textContent='📢 Publish Announcement';
-        return;
-      }
-      btn.textContent='⏳ Server waking up... Retry '+(i+1)+'/3 - Wait 10 sec...';
-      await new Promise(r=>setTimeout(r,10000));
-    }
-  }
-}
-</script>
-</body>
-</html>
-";
-            return Content(html, "text/html");
-        }
-
-        [HttpPost("announce")]
-        public async Task<IActionResult> Announce([FromBody] Dictionary<string, object> data)
-        {
-            try
-            {
-                if (data == null) return BadRequest(new { success = false, message = "Data is required." });
-                var title = GetString(data, "title");
-                var message = GetString(data, "message");
-                if (string.IsNullOrWhiteSpace(message)) message = GetString(data, "body");
-                var type = GetString(data, "type");
-                if (string.IsNullOrWhiteSpace(type)) type = "info";
-
-                if (string.IsNullOrWhiteSpace(title) || title.Length < 3)
-                    return BadRequest(new { success = false, message = "Title must be at least 3 characters." });
-                if (string.IsNullOrWhiteSpace(message) || message.Length < 10)
-                    return BadRequest(new { success = false, message = "Message must be at least 10 characters." });
-
-                var db = _firebase.FirestoreDb;
-                var docId = Guid.NewGuid().ToString("N");
-                var now = Timestamp.GetCurrentTimestamp();
-                var doc = new Dictionary<string, object>
-                {
-                    ["id"] = docId,
-                    ["title"] = title,
-                    ["message"] = message,
-                    ["type"] = type,
-                    ["priority"] = type == "warning" || type == "alert" ? "high" : "normal",
-                    ["createdAt"] = now,
-                    ["createdBy"] = "admin",
-                    ["isActive"] = true
-                };
-                await db.Collection("safety_notices").Document(docId).SetAsync(doc);
-
-                _logger.LogInformation("Announcement published {DocId} Title {Title}", docId, title);
-                return Ok(new { success = true, id = docId, message = "Announcement published successfully." });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to publish announcement");
-                return StatusCode(500, new { success = false, message = "An error occurred while publishing." });
             }
         }
     }

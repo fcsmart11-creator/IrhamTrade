@@ -7,9 +7,7 @@ using IrhamTrade.Server.Services;
 
 namespace IrhamTrade.Server.Controllers
 {
-    // Purpose: Support + admin control - announcements, messages, seller reports, plan upgrade requests (publish limit / top placement).
-    // Admin login: ADMIN_KEY (Render setting) is used once to create the admin password. After that the admin logs in with the password.
-    // Every admin action needs the session token (X-Admin-Token header) returned by the login.
+    
     [ApiController]
     [Route("api/[controller]")]
     public class SupportController : ControllerBase
@@ -122,6 +120,70 @@ namespace IrhamTrade.Server.Controllers
             if (fu.HasValue && fu.Value > now) parts.Add($"Top until {fu.Value:yyyy-MM-dd}");
             return string.Join(" | ", parts);
         }
+
+        // ===== PAYMENT SETTINGS (typed on the admin page, saved in Firestore, Render values are only a backup) =====
+        private sealed class PlanSettings
+        {
+            public string MomoNumber = "";
+            public string MomoName = "";
+            public string LimitPrice = "";
+            public string FeaturedPrice = "";
+            public int LimitItems = 20;
+            public int LimitDays = 30;
+            public int FeaturedDays = 7;
+            public bool Saved;
+        }
+
+        private async Task<PlanSettings> LoadPlanSettingsAsync()
+        {
+            if (_cache.TryGetValue("plan_settings", out PlanSettings? cached) && cached != null) return cached;
+
+            var s = new PlanSettings
+            {
+                MomoNumber = EnvStr("PLAN_MOMO_NUMBER"),
+                MomoName = EnvStr("PLAN_MOMO_NAME"),
+                LimitPrice = EnvStr("PLAN_LIMIT_PRICE"),
+                FeaturedPrice = EnvStr("PLAN_FEATURED_PRICE"),
+                LimitItems = EnvInt("PLAN_LIMIT_ITEMS", 20),
+                LimitDays = EnvInt("PLAN_LIMIT_DAYS", 30),
+                FeaturedDays = EnvInt("PLAN_FEATURED_DAYS", 7)
+            };
+
+            try
+            {
+                var snap = await _firebase.FirestoreDb.Collection("admin_config").Document("plan_settings").GetSnapshotAsync();
+                if (snap.Exists)
+                {
+                    var d = snap.ToDictionary();
+                    s.Saved = true;
+                    if (d.ContainsKey("momoNumber")) s.MomoNumber = GetString(d, "momoNumber");
+                    if (d.ContainsKey("momoName")) s.MomoName = GetString(d, "momoName");
+                    if (d.ContainsKey("limitPrice")) s.LimitPrice = GetString(d, "limitPrice");
+                    if (d.ContainsKey("featuredPrice")) s.FeaturedPrice = GetString(d, "featuredPrice");
+                    s.LimitItems = IntOf(d, "limitItems", s.LimitItems);
+                    s.LimitDays = IntOf(d, "limitDays", s.LimitDays);
+                    s.FeaturedDays = IntOf(d, "featuredDays", s.FeaturedDays);
+                }
+                _cache.Set("plan_settings", s, TimeSpan.FromSeconds(30));
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Could not read plan settings - using the Render values"); }
+            return s;
+        }
+
+        private static object SettingsShape(PlanSettings s) => new
+        {
+            freeLimit = DashboardService.FreeLimit,
+            momoNumber = s.MomoNumber,
+            momoName = s.MomoName,
+            limitItems = s.LimitItems,
+            limitDays = s.LimitDays,
+            limitPrice = s.LimitPrice,
+            featuredDays = s.FeaturedDays,
+            featuredPrice = s.FeaturedPrice,
+            saved = s.Saved
+        };
+
+        private static string CleanPrice(string raw) => new string((raw ?? "").Where(c => char.IsDigit(c) || c == '.').ToArray());
 
         // ===== ADMIN LOGIN: key (once) -> password -> session token =====
         private sealed class AdminCreds
@@ -431,19 +493,10 @@ namespace IrhamTrade.Server.Controllers
 
         // ===== PUBLIC: plan info + upgrade requests (used by the business app) =====
         [HttpGet("plan-info")]
-        public IActionResult PlanInfo()
+        public async Task<IActionResult> PlanInfo()
         {
-            return Ok(new
-            {
-                freeLimit = DashboardService.FreeLimit,
-                momoNumber = EnvStr("PLAN_MOMO_NUMBER"),
-                momoName = EnvStr("PLAN_MOMO_NAME"),
-                limitItems = EnvInt("PLAN_LIMIT_ITEMS", 20),
-                limitDays = EnvInt("PLAN_LIMIT_DAYS", 30),
-                limitPrice = EnvStr("PLAN_LIMIT_PRICE"),
-                featuredDays = EnvInt("PLAN_FEATURED_DAYS", 7),
-                featuredPrice = EnvStr("PLAN_FEATURED_PRICE")
-            });
+            var s = await LoadPlanSettingsAsync();
+            return Ok(SettingsShape(s));
         }
 
         [HttpGet("plan/{businessId}")]
@@ -599,6 +652,63 @@ namespace IrhamTrade.Server.Controllers
             catch (Exception ex) { _logger.LogError(ex, "Admin summary failed"); return StatusCode(500, new { success = false, message = "Could not load the summary" }); }
         }
 
+        // ===== ADMIN: payment settings (MoMo number, name, prices, days) =====
+        [HttpGet("admin/settings")]
+        public async Task<IActionResult> AdminGetSettings()
+        {
+            var denied = await CheckAdminAsync(); if (denied != null) return denied;
+            try
+            {
+                _cache.Remove("plan_settings");
+                var s = await LoadPlanSettingsAsync();
+                return Ok(SettingsShape(s));
+            }
+            catch (Exception ex) { _logger.LogError(ex, "Admin get settings failed"); return StatusCode(500, new { success = false, message = "Could not load the settings" }); }
+        }
+
+        [HttpPost("admin/settings")]
+        public async Task<IActionResult> AdminSaveSettings([FromBody] Dictionary<string, object> body)
+        {
+            var denied = await CheckAdminAsync(); if (denied != null) return denied;
+            try
+            {
+                if (body == null) return BadRequest(new { success = false, message = "Settings are required." });
+
+                var momoNumber = new string(GetString(body, "momoNumber").Where(c => char.IsDigit(c) || c == '+').ToArray());
+                var momoName = GetString(body, "momoName");
+                var limitPrice = CleanPrice(GetString(body, "limitPrice"));
+                var featuredPrice = CleanPrice(GetString(body, "featuredPrice"));
+                var limitItems = IntOf(body, "limitItems", 0);
+                var limitDays = IntOf(body, "limitDays", 0);
+                var featuredDays = IntOf(body, "featuredDays", 0);
+
+                var digits = momoNumber.Count(char.IsDigit);
+                if (digits < 9 || digits > 15) return BadRequest(new { success = false, message = "Enter your Mobile Money number (9 to 15 digits)." });
+                if (momoName.Length < 2 || momoName.Length > 60) return BadRequest(new { success = false, message = "Enter the name that shows when people send you money (2 to 60 characters)." });
+                if (limitItems <= DashboardService.FreeLimit || limitItems > 500) return BadRequest(new { success = false, message = $"The item limit must be between {DashboardService.FreeLimit + 1} and 500." });
+                if (limitDays < 1 || limitDays > 365) return BadRequest(new { success = false, message = "Limit days must be between 1 and 365." });
+                if (featuredDays < 1 || featuredDays > 365) return BadRequest(new { success = false, message = "Top placement days must be between 1 and 365." });
+                if (limitPrice.Length > 10 || featuredPrice.Length > 10) return BadRequest(new { success = false, message = "Prices are too long. Use numbers only, for example 20." });
+
+                await _firebase.FirestoreDb.Collection("admin_config").Document("plan_settings").SetAsync(new Dictionary<string, object>
+                {
+                    ["momoNumber"] = momoNumber,
+                    ["momoName"] = momoName,
+                    ["limitItems"] = (long)limitItems,
+                    ["limitDays"] = (long)limitDays,
+                    ["limitPrice"] = limitPrice,
+                    ["featuredDays"] = (long)featuredDays,
+                    ["featuredPrice"] = featuredPrice,
+                    ["updatedAt"] = Timestamp.GetCurrentTimestamp()
+                });
+                _cache.Remove("plan_settings");
+                await AuditAsync("save-settings", $"MoMo {momoNumber} ({momoName}); more items {limitItems} items / {limitDays} days / GHS {limitPrice}; top {featuredDays} days / GHS {featuredPrice}");
+                var s = await LoadPlanSettingsAsync();
+                return Ok(new { success = true, message = "Payment settings saved. Businesses see them now.", settings = SettingsShape(s) });
+            }
+            catch (Exception ex) { _logger.LogError(ex, "Admin save settings failed"); return StatusCode(500, new { success = false, message = "Could not save the settings. Try again." }); }
+        }
+
         // ===== ADMIN: announcements =====
         [HttpPost("announce")]
         public async Task<IActionResult> Announce([FromBody] Dictionary<string, object> data)
@@ -741,19 +851,20 @@ namespace IrhamTrade.Server.Controllers
                 var businessId = GetString(r, "businessId");
                 var businessName = GetString(r, "businessName");
                 var plan = GetString(r, "plan");
+                var settings = await LoadPlanSettingsAsync();
                 string done;
 
                 if (plan == "featured")
                 {
-                    var days = IntOf(body, "days", EnvInt("PLAN_FEATURED_DAYS", 7));
+                    var days = IntOf(body, "days", settings.FeaturedDays);
                     var res = await ApplyFeaturedAsync(businessId, days);
                     if (!res.Ok) return BadRequest(new { success = false, message = res.Message });
                     done = res.Message;
                 }
                 else
                 {
-                    var items = IntOf(body, "limit", EnvInt("PLAN_LIMIT_ITEMS", 20));
-                    var days = IntOf(body, "days", EnvInt("PLAN_LIMIT_DAYS", 30));
+                    var items = IntOf(body, "limit", settings.LimitItems);
+                    var days = IntOf(body, "days", settings.LimitDays);
                     var res = await ApplyLimitAsync(businessId, items, days);
                     if (!res.Ok) return BadRequest(new { success = false, message = res.Message });
                     done = res.Message;
@@ -934,8 +1045,9 @@ namespace IrhamTrade.Server.Controllers
             try
             {
                 var businessId = GetString(body, "businessId");
-                var items = IntOf(body, "limit", EnvInt("PLAN_LIMIT_ITEMS", 20));
-                var days = IntOf(body, "days", EnvInt("PLAN_LIMIT_DAYS", 30));
+                var settings = await LoadPlanSettingsAsync();
+                var items = IntOf(body, "limit", settings.LimitItems);
+                var days = IntOf(body, "days", settings.LimitDays);
                 var res = await ApplyLimitAsync(businessId, items, days);
                 if (!res.Ok) return BadRequest(new { success = false, message = res.Message });
                 await AuditAsync("grant-limit", $"{businessId} - {res.Message}");
@@ -951,7 +1063,8 @@ namespace IrhamTrade.Server.Controllers
             try
             {
                 var businessId = GetString(body, "businessId");
-                var days = IntOf(body, "days", EnvInt("PLAN_FEATURED_DAYS", 7));
+                var settings = await LoadPlanSettingsAsync();
+                var days = IntOf(body, "days", settings.FeaturedDays);
                 var res = await ApplyFeaturedAsync(businessId, days);
                 if (!res.Ok) return BadRequest(new { success = false, message = res.Message });
                 await AuditAsync("grant-featured", $"{businessId} - {res.Message}");
@@ -1067,6 +1180,8 @@ body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;back
 .pad{padding:24px}
 .muted{color:var(--muted);font-size:13px;line-height:1.5}
 a{color:var(--navy)}
+svg{display:block}
+.ic svg,.i svg,.hic svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 
 #gate{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:radial-gradient(1100px 520px at 50% -10%,#1E3E8A 0%,var(--navy) 62%)}
 .gcard{background:#fff;width:100%;max-width:420px;border-radius:26px;padding:28px 24px;box-shadow:0 26px 70px rgba(0,0,0,.4)}
@@ -1075,7 +1190,7 @@ a{color:var(--navy)}
 .gcard .sub{text-align:center;margin:0 0 18px}
 label{display:block;font-weight:600;font-size:12.5px;color:#34415F;margin:12px 0 5px}
 input,textarea,select{width:100%;padding:13px 14px;border:1.5px solid var(--line);border-radius:12px;font-size:15px;background:#fff;color:var(--text);outline:none;font-family:inherit}
-input:focus,textarea:focus,select:focus{border-color:var(--gold)}
+input:focus,textarea:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(212,175,55,.18)}
 .btn{display:inline-block;padding:13px 16px;border:none;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit}
 .btn.full{width:100%;margin-top:16px}
 .gold{background:var(--gold);color:var(--navy)}
@@ -1095,16 +1210,20 @@ input:focus,textarea:focus,select:focus{border-color:var(--gold)}
 #view{max-width:680px;margin:0 auto;padding:18px 14px}
 .h{margin:4px 2px 4px;color:var(--navy);font-size:21px}
 .card{background:#fff;border-radius:18px;padding:16px;margin-top:12px;box-shadow:0 2px 12px rgba(10,30,74,.07)}
-.card h3{margin:0 0 6px;color:var(--navy);font-size:16px}
+.card h3{margin:0 0 6px;color:var(--navy);font-size:16px;display:flex;align-items:center;gap:8px}
+.card h3 .hic{width:30px;height:30px;border-radius:9px;background:#EEF1F7;color:var(--navy);display:flex;align-items:center;justify-content:center}
+.card h3 .hic svg{width:17px;height:17px}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
 .stat{background:#fff;border-radius:16px;padding:14px 8px;text-align:center;box-shadow:0 2px 12px rgba(10,30,74,.07);cursor:pointer}
+.stat .i{width:42px;height:42px;border-radius:13px;background:#EEF1F7;color:var(--navy);display:flex;align-items:center;justify-content:center;margin:0 auto 8px}
 .stat .n{font-size:26px;font-weight:800;color:var(--navy)}
 .stat .l{font-size:11.5px;color:var(--muted);margin-top:2px}
-.stat .i{font-size:20px}
 .kv{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
 .kv:last-child{border-bottom:none}
 .kv span:first-child{color:var(--muted)}
 .kv span:last-child{font-weight:700;text-align:right}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.sect{font-size:11.5px;font-weight:800;letter-spacing:1px;color:var(--gold);margin:16px 0 0;text-transform:uppercase}
 .seg{display:flex;background:#fff;border-radius:13px;padding:4px;margin-top:12px;box-shadow:0 2px 12px rgba(10,30,74,.06)}
 .seg button{flex:1;border:none;background:none;padding:10px 6px;border-radius:10px;font-weight:700;font-size:13px;color:var(--muted);cursor:pointer;font-family:inherit}
 .seg button.on{background:var(--navy);color:#fff}
@@ -1117,9 +1236,8 @@ input:focus,textarea:focus,select:focus{border-color:var(--gold)}
 .empty{text-align:center;color:var(--muted);padding:34px 10px;font-size:14px}
 .nav{position:fixed;left:0;right:0;bottom:0;background:#fff;display:flex;border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom);z-index:30}
 .nav button{flex:1;background:none;border:none;padding:9px 2px 8px;font-size:10.5px;color:var(--muted);font-weight:700;cursor:pointer;position:relative;font-family:inherit}
-.nav button .ic{display:block;font-size:20px;margin-bottom:1px}
+.nav button .ic{display:flex;justify-content:center;margin-bottom:2px}
 .nav button.on{color:var(--navy)}
-.nav button.on .ic{transform:translateY(-1px)}
 .nav button.on::after{content:'';position:absolute;top:0;left:30%;right:30%;height:3px;border-radius:0 0 4px 4px;background:var(--gold)}
 .badge{position:absolute;top:4px;left:calc(50% + 6px);background:var(--red);color:#fff;border-radius:10px;font-size:10px;min-width:17px;padding:1px 4px;font-weight:800}
 .toast{position:fixed;left:14px;right:14px;top:calc(12px + env(safe-area-inset-top));max-width:520px;margin:0 auto;padding:13px 14px;border-radius:13px;color:#fff;font-weight:600;font-size:14px;z-index:99;display:none;text-align:center;box-shadow:0 8px 28px rgba(0,0,0,.25)}
@@ -1148,11 +1266,11 @@ input:focus,textarea:focus,select:focus{border-color:var(--gold)}
   </div>
   <div id='view'></div>
   <div class='nav'>
-    <button id='n_home' onclick="go('home')"><span class='ic'>&#127968;</span>Home</button>
-    <button id='n_pay' onclick="go('pay')"><span class='ic'>&#128179;</span>Payments<span id='b_pay' class='badge hide'></span></button>
-    <button id='n_inbox' onclick="go('inbox')"><span class='ic'>&#128229;</span>Inbox<span id='b_inbox' class='badge hide'></span></button>
-    <button id='n_biz' onclick="go('biz')"><span class='ic'>&#127970;</span>Businesses</button>
-    <button id='n_notice' onclick="go('notice')"><span class='ic'>&#128226;</span>Notices</button>
+    <button id='n_home' onclick="go('home')"><span class='ic' data-i='home'></span>Home</button>
+    <button id='n_pay' onclick="go('pay')"><span class='ic' data-i='card'></span>Payments<span id='b_pay' class='badge hide'></span></button>
+    <button id='n_inbox' onclick="go('inbox')"><span class='ic' data-i='inbox'></span>Inbox<span id='b_inbox' class='badge hide'></span></button>
+    <button id='n_biz' onclick="go('biz')"><span class='ic' data-i='building'></span>Businesses</button>
+    <button id='n_notice' onclick="go('notice')"><span class='ic' data-i='megaphone'></span>Notices</button>
   </div>
 </div>
 
@@ -1169,6 +1287,21 @@ let INFO = {};
 let SUM = {};
 const ST = { req: 'new', itype: 'messages', istatus: 'new' };
 const REQS = {}, BIZ = {};
+
+/* ---------- line icons (replace the old emoji) ---------- */
+const ICONS = {
+  home: "<path d='M3 11l9-8 9 8'/><path d='M5 10v10h14V10'/><path d='M10 20v-6h4v6'/>",
+  card: "<rect x='2' y='5' width='20' height='14' rx='3'/><path d='M2 10h20'/><path d='M6 15h4'/>",
+  inbox: "<path d='M22 12h-6l-2 3h-4l-2-3H2'/><path d='M5.5 5h13L22 12v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z'/>",
+  building: "<path d='M4 21V4a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v17'/><path d='M15 9h4a1 1 0 0 1 1 1v11'/><path d='M3 21h18'/><path d='M8 7h3M8 11h3M8 15h3'/>",
+  megaphone: "<path d='M3 11v2a1 1 0 0 0 1 1h3l8 4V6L7 10H4a1 1 0 0 0-1 1z'/><path d='M18 9a4 4 0 0 1 0 6'/>",
+  mail: "<rect x='3' y='5' width='18' height='14' rx='2'/><path d='m3 7 9 6 9-6'/>",
+  flag: "<path d='M5 21V4'/><path d='M5 4h12l-2 4 2 4H5'/>",
+  sliders: "<path d='M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1'/><circle cx='15' cy='6' r='2'/><circle cx='9' cy='12' r='2'/><circle cx='17' cy='18' r='2'/>",
+  lock: "<rect x='4' y='11' width='16' height='10' rx='2'/><path d='M8 11V7a4 4 0 0 1 8 0v4'/>"
+};
+function ic(n){ return "<svg viewBox='0 0 24 24'>" + (ICONS[n] || '') + "</svg>"; }
+function paintIcons(){ document.querySelectorAll('[data-i]').forEach(el => { el.innerHTML = ic(el.getAttribute('data-i')); }); }
 
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmt(iso){ if(!iso) return ''; const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleString([], {day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit'}); }
@@ -1275,24 +1408,54 @@ function ask(title, text, fields, okText, danger){
 async function renderHome(){
   $('view').innerHTML = `<div class='muted center pad'>Loading...</div>`;
   await loadSummary();
-  try{ INFO = await api('plan-info', 'GET', null, true); }catch(e){}
+  try{ INFO = await api('admin/settings'); }catch(e){}
   const s = SUM || {};
-  const stat = (i, l, n, act) => `<div class='stat' onclick="${act}"><div class='i'>${i}</div><div class='n'>${n}</div><div class='l'>${l}</div></div>`;
+  const stat = (i, l, n, act) => `<div class='stat' onclick="${act}"><div class='i'>${ic(i)}</div><div class='n'>${n}</div><div class='l'>${l}</div></div>`;
   $('view').innerHTML = `<h2 class='h'>Overview</h2>
-    <div class='grid'>${stat('&#128179;', 'Payments', s.newRequests || 0, "go('pay')")}${stat('&#128236;', 'Messages', s.newMessages || 0, "ST.itype='messages';ST.istatus='new';go('inbox')")}${stat('&#128681;', 'Reports', s.newReports || 0, "ST.itype='reports';ST.istatus='new';go('inbox')")}</div>
-    <div class='card'><h3>What businesses see</h3>
-      <p class='muted'>These come from your Render settings. Change them in Render, no new app needed.</p>
-      <div class='kv'><span>MoMo number</span><span>${esc(INFO.momoNumber || 'Not set')}</span></div>
-      <div class='kv'><span>MoMo name</span><span>${esc(INFO.momoName || 'Not set')}</span></div>
-      <div class='kv'><span>More items</span><span>${esc(INFO.limitItems || '')} items / ${esc(INFO.limitDays || '')} days - GHS ${esc(INFO.limitPrice || 'not set')}</span></div>
-      <div class='kv'><span>Top placement</span><span>${esc(INFO.featuredDays || '')} days - GHS ${esc(INFO.featuredPrice || 'not set')}</span></div>
-      <div class='kv'><span>Free plan</span><span>${esc(INFO.freeLimit || 10)} items</span></div>
+    <div class='grid'>${stat('card', 'Payments', s.newRequests || 0, "go('pay')")}${stat('mail', 'Messages', s.newMessages || 0, "ST.itype='messages';ST.istatus='new';go('inbox')")}${stat('flag', 'Reports', s.newReports || 0, "ST.itype='reports';ST.istatus='new';go('inbox')")}</div>
+    <div class='card'><h3><span class='hic'>${ic('sliders')}</span>Payment settings</h3>
+      <p class='muted'>Businesses see these on the Upload page. Type your details and tap Save. Changes show in the app straight away.</p>
+      <div class='sect'>Where businesses pay you</div>
+      <label>Mobile Money number</label><input id='s_momo' type='tel' inputmode='tel' placeholder='e.g. 0241234567' value='${esc(INFO.momoNumber || '')}'>
+      <label>Name shown when money is sent</label><input id='s_name' placeholder='e.g. Irham Trade' value='${esc(INFO.momoName || '')}'>
+      <div class='sect'>More items</div>
+      <div class='two'>
+        <div><label>Item limit</label><input id='s_li' type='number' inputmode='numeric' value='${esc(INFO.limitItems || 20)}'></div>
+        <div><label>Days it lasts</label><input id='s_ld' type='number' inputmode='numeric' value='${esc(INFO.limitDays || 30)}'></div>
+      </div>
+      <label>Price (GHS)</label><input id='s_lp' type='number' inputmode='decimal' placeholder='e.g. 20' value='${esc(INFO.limitPrice || '')}'>
+      <div class='sect'>Top placement</div>
+      <div class='two'>
+        <div><label>Days at the top</label><input id='s_fd' type='number' inputmode='numeric' value='${esc(INFO.featuredDays || 7)}'></div>
+        <div><label>Price (GHS)</label><input id='s_fp' type='number' inputmode='decimal' placeholder='e.g. 10' value='${esc(INFO.featuredPrice || '')}'></div>
+      </div>
+      <div class='hint'>Free plan: ${esc(INFO.freeLimit || 10)} items. ${INFO.saved ? 'Your saved settings are in use.' : 'Not saved yet - the values above come from the server backup.'}</div>
+      <button class='btn gold full' onclick='saveSettings()'>Save payment settings</button>
     </div>
-    <div class='card'><h3>Security</h3>
+    <div class='card'><h3><span class='hic'>${ic('lock')}</span>Security</h3>
       <p class='muted'>Your session lasts 12 hours. Use a screen lock on this phone.</p>
       <button class='btn navy sm' onclick='changePassword()'>Change password</button>
       <button class='btn ghost sm' onclick='logout()'>Log out</button>
     </div>`;
+}
+async function saveSettings(){
+  const body = {
+    momoNumber: $('s_momo').value.trim(),
+    momoName: $('s_name').value.trim(),
+    limitItems: parseInt($('s_li').value),
+    limitDays: parseInt($('s_ld').value),
+    limitPrice: $('s_lp').value.trim(),
+    featuredDays: parseInt($('s_fd').value),
+    featuredPrice: $('s_fp').value.trim()
+  };
+  if(!body.momoNumber){ toast('Enter your Mobile Money number', false); return; }
+  if(!body.momoName){ toast('Enter the name shown when money is sent', false); return; }
+  try{
+    const r = await api('admin/settings', 'POST', body);
+    if(r.settings) INFO = r.settings;
+    toast(r.message || 'Saved', true);
+    renderHome();
+  }catch(e){ toast(e.message, false); }
 }
 async function changePassword(){
   const v = await ask('Change password', 'Enter your admin key and the new password.', [
@@ -1442,6 +1605,7 @@ async function removeNotice(id){
 
 /* ---------- start ---------- */
 async function boot(){
+  paintIcons();
   try{ GATE = await api('admin/status', 'GET', null, true); }
   catch(e){ $('gateBody').innerHTML = `<h1>Can't reach the server</h1><p class='muted center'>${esc(e.message)}</p><button class='btn gold full' onclick='location.reload()'>Try again</button>`; return; }
   if(localStorage.getItem(TK) && GATE.passwordSet){
